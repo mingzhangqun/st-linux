@@ -1,0 +1,420 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
+/*
+ * Copyright (C) STMicroelectronics 2021 - All Rights Reserved
+ * Author: Alexandre Torgue <alexandre.torgue@foss.st.com> for STMicroelectronics.
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/clock/stm32mp13-clks.h>
+#include "stm32mp135d-odyssey.dts"
+
+/ {
+	clocks {
+		wm8960_mclk: wm8960-mclk {
+			compatible = "fixed-clock";
+			#clock-cells = <0>;
+			clock-frequency = <24000000>;
+		};
+	};
+
+	sound {
+		compatible = "audio-graph-card";
+		label = "seeed-2mic-voicecard";
+		mclk-fs = <256>;
+		dai-format = "i2s";
+		widgets =
+			"Microphone", "Mic Jack",
+			"Line", "Line In",
+			"Line", "Line Out",
+			"Speaker", "Speaker",
+			"Headphone", "Headphone Jack";
+
+		routing =
+			"Headphone Jack", "HP_L",
+			"Headphone Jack", "HP_R",
+			"Speaker", "SPK_LP",
+			"Speaker", "SPK_LN",
+			"LINPUT1", "Mic Jack",
+			"LINPUT3", "Mic Jack",
+			"RINPUT1", "Mic Jack",
+			"RINPUT2", "Mic Jack";
+
+		dais = <&sai1a_port &sai1b_port>;
+		status = "okay";
+	};
+};
+
+&i2c1 {
+	wm8960: wm8960@1a {
+		compatible = "wlf,wm8960";
+		reg = <0x1a>;
+		#sound-dai-cells = <0>;
+		AVDD-supply = <&scmi_vdd>;
+		DVDD-supply = <&scmi_v3v3_sw>;
+		clocks = <&wm8960_mclk>;
+		clock-names = "mclk";
+		wlf,shared-lrclk;
+		status = "okay";
+
+		port {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			wm8960_tx_endpoint: endpoint@0 {
+				reg = <0>;
+				remote-endpoint = <&sai1a_endpoint>;
+				frame-master;
+				bitclock-master;
+			};
+
+			wm8960_rx_endpoint: endpoint@1 {
+				reg = <1>;
+				remote-endpoint = <&sai1b_endpoint>;
+				frame-master;
+				bitclock-master;
+			};
+		};
+	};
+};
+
+&timers2 {
+	/delete-property/dmas;
+	/delete-property/dma-names;
+	status = "okay";
+	pwm {
+		pinctrl-0 = <&pwm2_pins_a>;
+		pinctrl-1 = <&pwm2_sleep_pins_a>;
+		pinctrl-names = "default", "sleep";
+		status = "okay";
+	};
+	timer@2 {
+		status = "okay";
+	};
+};
+
+&timers3 {
+	/delete-property/dmas;
+	/delete-property/dma-names;
+	status = "okay";
+	pwm {
+		pinctrl-0 = <&pwm3_pins_a>;
+		pinctrl-1 = <&pwm3_sleep_pins_a>;
+		pinctrl-names = "default", "sleep";
+		status = "okay";
+	};
+	timer@2 {
+		status = "okay";
+	};
+	counter {
+		status = "okay";
+	};
+};
+
+&timers5 {
+	/delete-property/dmas;
+	/delete-property/dma-names;
+	status = "okay";
+	pwm {
+		pinctrl-0 = <&pwm5_pins_a>;
+		pinctrl-1 = <&pwm5_sleep_pins_a>;
+		pinctrl-names = "default", "sleep";
+		status = "okay";
+	};
+	timer@2 {
+		status = "okay";
+	};
+};
+
+&qspi {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	pinctrl-names = "default", "sleep";
+	pinctrl-0 = <&qspi_clk_pins_a &qspi_pins_a>;
+	pinctrl-1 = <&qspi_clk_sleep_pins_a &qspi_sleep_pins_a>;
+
+	flash0: w25q32@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		spi-rx-bus-width = <4>;
+		spi-tx-bus-width = <4>;
+		spi-max-frequency = <50000000>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+	};
+};
+
+&sai1 {
+	#sound-dai-cells = <0>;
+	pinctrl-names = "default", "sleep";
+	pinctrl-0 = <&sai1_pins_a>, <&sai1_pins_b>;
+	pinctrl-1 = <&sai1_sleep_pins_a>, <&sai1_sleep_pins_b>;
+	clocks = <&rcc SAI1>, <&scmi_clk CK_SCMI_PLL3_Q>, <&scmi_clk CK_SCMI_PLL3_R>;
+	clock-names = "pclk", "x8k", "x11k";
+	status = "okay";
+
+	sai1a: audio-controller@4400a004 {
+		dma-names = "tx";
+		status = "okay";
+		clocks = <&rcc SAI1_K>;
+		clock-names = "sai_ck";
+
+		sai1a_port: port {
+			sai1a_endpoint: endpoint {
+				remote-endpoint = <&wm8960_tx_endpoint>;
+				format = "i2s";
+				mclk-fs = <512>;
+				dai-tdm-slot-num = <2>;
+				dai-tdm-slot-width = <16>;
+			};
+		};
+	};
+
+	sai1b: audio-controller@4400a024 {
+		dma-names = "rx";
+		status = "okay";
+		st,sync = <&sai1a 2>;
+
+		sai1b_port: port {
+			sai1b_endpoint: endpoint {
+				remote-endpoint = <&wm8960_rx_endpoint>;
+				format = "i2s";
+				mclk-fs = <512>;
+				dai-tdm-slot-num = <2>;
+				dai-tdm-slot-width = <16>;
+			};
+		};
+	};
+};
+
+&spi5 {
+	pinctrl-names = "default", "sleep";
+	pinctrl-0 = <&spi5_pins_a>;
+	pinctrl-1 = <&spi5_sleep_pins_a>;
+	status = "okay";
+
+	cs-gpios = <&gpioh 11 GPIO_ACTIVE_LOW>, /* GPIOH_11 */
+		<&gpioe 10 GPIO_ACTIVE_LOW>; /* GPIOE_10 */
+
+	spidev@0{
+        compatible = "semtech,sx1301";
+        reg = <0>;
+        spi-max-frequency = <4000000>;
+    };
+
+	spidev@1{
+        compatible = "semtech,sx1301";
+        reg = <1>;
+        spi-max-frequency = <4000000>;
+    };
+};
+
+&usart2 {
+	pinctrl-names = "default", "sleep", "idle";
+	pinctrl-0 = <&usart2_pins_a>;
+	pinctrl-1 = <&usart2_sleep_pins_a>;
+	pinctrl-2 = <&usart2_idle_pins_a>;
+	uart-has-rtscts;
+	status = "okay";
+};
+
+&pinctrl {
+	/* timers2 */
+	pwm2_pins_a: pwm1-0 {
+		pins {
+			pinmux = <STM32_PINMUX('B', 10, AF1)>; /* TIM2_CH3 */
+			bias-pull-down;
+			drive-push-pull;
+			slew-rate = <0>;
+		};
+	};
+
+	pwm2_sleep_pins_a: pwm1-sleep-0 {
+		pins {
+			pinmux = <STM32_PINMUX('B', 10, ANALOG)>; /* TIM2_CH3 */
+		};
+	};
+
+	/* timers3 */
+	pwm3_pins_a: pwm3-0 {
+		pins {
+			pinmux = <STM32_PINMUX('A', 6, AF2)>, /* TIM3_CH1 */
+					<STM32_PINMUX('A', 7, AF2)>,  /* TIM3_CH2 */
+					<STM32_PINMUX('B', 1, AF2)>;  /* TIM3_CH4 */
+			bias-pull-down;
+			drive-push-pull;
+			slew-rate = <0>;
+		};
+	};
+
+	pwm3_sleep_pins_a: pwm3-sleep-0 {
+		pins {
+			pinmux = <STM32_PINMUX('A', 6, ANALOG)>, /* TIM3_CH1 */
+					<STM32_PINMUX('A', 7, ANALOG)>,  /* TIM3_CH2 */
+					<STM32_PINMUX('B', 1, ANALOG)>;  /* TIM3_CH4 */
+		};
+	};
+
+	/* timers5 */
+	pwm5_pins_a: pwm5-0 {
+		pins {
+			pinmux = <STM32_PINMUX('A', 3, AF2)>; /* TIM5_CH4 */
+			bias-pull-down;
+			drive-push-pull;
+			slew-rate = <0>;
+		};
+	};
+
+	pwm5_sleep_pins_a: pwm5-sleep-0 {
+		pins {
+			pinmux = <STM32_PINMUX('A', 3, ANALOG)>; /* TIM5_CH4 */
+		};
+	};
+
+	/* qspi */
+	qspi_clk_pins_a: qspi-clk-0 {
+		pins {
+			pinmux = <STM32_PINMUX('F', 10, AF9)>; /* QSPI_CLK */
+			bias-disable;
+			drive-push-pull;
+			slew-rate = <3>;
+		};
+	};
+
+	qspi_clk_sleep_pins_a: qspi-clk-sleep-0 {
+		pins {
+			pinmux = <STM32_PINMUX('F', 10, ANALOG)>; /* QSPI_CLK */
+		};
+	};
+
+	qspi_pins_a: qspi-0 {
+		pins1 {
+			pinmux = <STM32_PINMUX('D', 5, AF9)>, /* QSPI_BK1_IO0 */
+				 <STM32_PINMUX('F', 9, AF10)>, /* QSPI_BK1_IO1 */
+				 <STM32_PINMUX('D', 11, AF9)>, /* QSPI_BK1_IO2 */
+				 <STM32_PINMUX('D', 13, AF9)>; /* QSPI_BK1_IO3 */
+			bias-disable;
+			drive-push-pull;
+			slew-rate = <3>;
+		};
+		pins2 {
+			pinmux = <STM32_PINMUX('E', 14, AF9)>; /* QSPI_BK1_NCS */
+			bias-pull-up;
+			drive-push-pull;
+			slew-rate = <3>;
+		};
+	};
+
+	qspi_sleep_pins_a: qspi-sleep-0 {
+		pins {
+			pinmux = <STM32_PINMUX('D', 5, ANALOG)>, /* QSPI_BK1_IO0 */
+				 <STM32_PINMUX('F', 9, AF10)>, /* QSPI_BK1_IO1 */
+				 <STM32_PINMUX('D', 11, AF9)>, /* QSPI_BK1_IO2 */
+				 <STM32_PINMUX('D', 13, AF9)>, /* QSPI_BK1_IO3 */
+				 <STM32_PINMUX('E', 14, ANALOG)>; /* QSPI_BK1_NCS */
+		};
+	};
+
+	/* sai1 */
+	sai1_pins_a: sai1a-1 {
+		pins {
+			pinmux = <STM32_PINMUX('C',  0, AF2)>,	/* SAI1_SCK */
+					 <STM32_PINMUX('E', 11, AF6)>,	/* SAI1_FSA */
+					 <STM32_PINMUX('A',  5, AF6)>;	/* SAI1_SDA */
+			slew-rate = <0>;
+			drive-push-pull;
+			bias-disable;
+		};
+	};
+
+	sai1_sleep_pins_a: sai1a-sleep-1 {
+		pins {
+			pinmux = <STM32_PINMUX('C', 0, ANALOG)>,	/* SAI1_SCK */
+					 <STM32_PINMUX('E', 11, ANALOG)>,	/* SAI1_FS */
+					 <STM32_PINMUX('A', 5, ANALOG)>;	/* SAI1_SDA */
+		};
+	};
+
+	sai1_pins_b: sai1b-1 {
+		pins {
+			pinmux = <STM32_PINMUX('A', 0, AF6)>;		/* SAI1_SDB */
+			slew-rate = <0>;
+			drive-push-pull;
+			bias-disable;
+		};
+	};
+
+	sai1_sleep_pins_b: sai1b-sleep-1 {
+		pins {
+			pinmux = <STM32_PINMUX('A', 0, ANALOG)>;	/* SAI1_SDB */
+		};
+	};
+
+	/* spi5 */
+	spi5_pins_a: spi5-0 {
+		pins1 {
+			pinmux = <STM32_PINMUX('G', 10, AF5)>, /* SPI5_SCK */
+				 <STM32_PINMUX('H', 12, AF5)>; /* SPI5_MOSI */
+			bias-disable;
+			drive-push-pull;
+			slew-rate = <1>;
+		};
+
+		pins2 {
+			pinmux = <STM32_PINMUX('E', 4, AF1)>; /* SPI5_MISO */
+			bias-disable;
+		};
+	};
+
+	spi5_sleep_pins_a: spi5-sleep-0 {
+		pins {
+			pinmux = <STM32_PINMUX('G', 10, ANALOG)>, /* SPI5_SCK */
+				 <STM32_PINMUX('H', 12, ANALOG)>, /* SPI5_MOSI */
+				 <STM32_PINMUX('E', 4, ANALOG)>; /* SPI5_MISO */
+		};
+	};
+
+	/* usart2 */
+	usart2_pins_a: usart2-0 {
+		pins1 {
+			pinmux = <STM32_PINMUX('F', 13, AF7)>, /* USART2_TX */
+				 <STM32_PINMUX('D', 4, AF3)>; /* USART2_RTS */
+			bias-disable;
+			drive-push-pull;
+			slew-rate = <0>;
+		};
+		pins2 {
+			pinmux = <STM32_PINMUX('D', 15, AF1)>, /* USART2_RX */
+				 <STM32_PINMUX('D', 3, AF3)>; /* USART2_CTS_NSS */
+			bias-pull-up;
+		};
+	};
+
+	usart2_idle_pins_a: usart2-idle-0 {
+		pins1 {
+			pinmux = <STM32_PINMUX('F', 13, ANALOG)>, /* USART2_TX */
+				 <STM32_PINMUX('D', 3, ANALOG)>; /* USART2_CTS_NSS */
+		};
+		pins2 {
+			pinmux = <STM32_PINMUX('D', 4, AF3)>; /* USART2_RTS */
+			bias-disable;
+			drive-push-pull;
+			slew-rate = <0>;
+		};
+		pins3 {
+			pinmux = <STM32_PINMUX('D', 15, AF1)>; /* USART2_RX */
+			bias-disable;
+		};
+	};
+
+	usart2_sleep_pins_a: usart2-sleep-0 {
+		pins {
+			pinmux = <STM32_PINMUX('F', 13, ANALOG)>, /* USART2_TX */
+				 <STM32_PINMUX('D', 4, ANALOG)>, /* USART2_RTS */
+				 <STM32_PINMUX('D', 15, ANALOG)>, /* USART2_RX */
+				 <STM32_PINMUX('D', 3, ANALOG)>; /* USART2_CTS_NSS */
+		};
+	};
+};
