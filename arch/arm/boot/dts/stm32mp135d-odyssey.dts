@@ -165,6 +165,18 @@
 		regulator-max-microvolt = <3300000>;
 		regulator-always-on;
 	};
+
+	wake_up {
+		compatible = "gpio-keys";
+		status = "okay";
+
+		button {
+			label = "wake-up";
+			linux,code = <KEY_WAKEUP>;
+			interrupts-extended = <&optee 0>;
+			status = "okay";
+		};
+	};
 };
 
 &crc1 {
@@ -427,6 +439,7 @@
 	no-sd;
 	no-sdio;
 	mmc-ddr-3_3v;
+	no-1-8-v;
 	max-frequency = <200000000>;
 	status = "okay";
 };

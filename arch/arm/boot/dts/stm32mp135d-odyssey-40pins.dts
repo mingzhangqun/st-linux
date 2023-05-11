@@ -199,16 +199,16 @@
 		<&gpioe 10 GPIO_ACTIVE_LOW>; /* GPIOE_10 */
 
 	spidev@0{
-        compatible = "semtech,sx1301";
-        reg = <0>;
-        spi-max-frequency = <4000000>;
-    };
+		compatible = "semtech,sx1301";
+		reg = <0>;
+		spi-max-frequency = <4000000>;
+	};
 
 	spidev@1{
-        compatible = "semtech,sx1301";
-        reg = <1>;
-        spi-max-frequency = <4000000>;
-    };
+		compatible = "semtech,sx1301";
+		reg = <1>;
+		spi-max-frequency = <4000000>;
+	};
 };
 
 &usart2 {
