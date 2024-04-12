@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// STMicroelectronics STM32 SPI Controller driver (master mode only)
+// STMicroelectronics STM32 SPI Controller driver
 //
 // Copyright (C) 2017, STMicroelectronics - All Rights Reserved
 // Author(s): Amelie Delaunay <amelie.delaunay@st.com> for STMicroelectronics.
@@ -18,6 +18,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/reset.h>
 #include <linux/spi/spi.h>
+#include <dt-bindings/spi/spi-stm32.h>
 
 #define DRIVER_NAME "spi_stm32"
 
@@ -84,6 +85,7 @@
 #define STM32H7_SPI_IFCR		0x18
 #define STM32H7_SPI_TXDR		0x20
 #define STM32H7_SPI_RXDR		0x30
+#define STM32H7_SPI_UDRDR		0x4C
 #define STM32H7_SPI_I2SCFGR		0x50
 
 /* STM32H7_SPI_CR1 bit fields */
@@ -101,6 +103,14 @@
 /* STM32H7_SPI_CFG1 bit fields */
 #define STM32H7_SPI_CFG1_DSIZE		GENMASK(4, 0)
 #define STM32H7_SPI_CFG1_FTHLV		GENMASK(8, 5)
+#define STM32H7_SPI_CFG1_UDRDET		GENMASK(12, 11)
+#define STM32H7_SPI_CFG1_UDRDET_BEGIN	0
+#define STM32H7_SPI_CFG1_UDRDET_LAST	1
+#define STM32H7_SPI_CFG1_UDRDET_SS	2
+#define STM32H7_SPI_CFG1_UDRCFG		GENMASK(10, 9)
+#define STM32H7_SPI_CFG1_UDRCFG_PTRN	0
+#define STM32H7_SPI_CFG1_UDRCFG_LAST_R	1
+#define STM32H7_SPI_CFG1_UDRCFG_LAST_T	2
 #define STM32H7_SPI_CFG1_RXDMAEN	BIT(14)
 #define STM32H7_SPI_CFG1_TXDMAEN	BIT(15)
 #define STM32H7_SPI_CFG1_MBR		GENMASK(30, 28)
@@ -117,6 +127,7 @@
 #define STM32H7_SPI_CFG2_CPHA		BIT(24)
 #define STM32H7_SPI_CFG2_CPOL		BIT(25)
 #define STM32H7_SPI_CFG2_SSM		BIT(26)
+#define STM32H7_SPI_CFG2_SSIOP		BIT(28)
 #define STM32H7_SPI_CFG2_AFCNTR		BIT(31)
 
 /* STM32H7_SPI_IER bit fields */
@@ -125,6 +136,7 @@
 #define STM32H7_SPI_IER_DXPIE		BIT(2)
 #define STM32H7_SPI_IER_EOTIE		BIT(3)
 #define STM32H7_SPI_IER_TXTFIE		BIT(4)
+#define STM32H7_SPI_IER_UDRIE		BIT(5)
 #define STM32H7_SPI_IER_OVRIE		BIT(6)
 #define STM32H7_SPI_IER_MODFIE		BIT(9)
 #define STM32H7_SPI_IER_ALL		GENMASK(10, 0)
@@ -133,6 +145,7 @@
 #define STM32H7_SPI_SR_RXP		BIT(0)
 #define STM32H7_SPI_SR_TXP		BIT(1)
 #define STM32H7_SPI_SR_EOT		BIT(3)
+#define STM32H7_SPI_SR_UDR		BIT(5)
 #define STM32H7_SPI_SR_OVR		BIT(6)
 #define STM32H7_SPI_SR_MODF		BIT(9)
 #define STM32H7_SPI_SR_SUSP		BIT(11)
@@ -144,6 +157,23 @@
 
 /* STM32H7_SPI_I2SCFGR bit fields */
 #define STM32H7_SPI_I2SCFGR_I2SMOD	BIT(0)
+
+/* STM32MP25_SPICFG2 bit fields */
+#define STM32MP25_SPI_CFG2_RDIOM	BIT(13)
+
+/* STM32MP25 SPI registers bit fields */
+#define STM32MP25_SPI_HWCFGR1			0x3F0
+
+/* STM32MP25_SPI_CR2 bit fields */
+#define STM32MP25_SPI_TSIZE_MAX_LIMITED		GENMASK(9, 0)
+
+/* STM32MP25_SPI_HWCFGR1 */
+#define STM32MP25_SPI_HWCFGR1_FULLCFG		GENMASK(27, 24)
+#define STM32MP25_SPI_HWCFGR1_FULLCFG_LIMITED	0x0
+#define STM32MP25_SPI_HWCFGR1_FULLCFG_FULL	0x1
+#define STM32MP25_SPI_HWCFGR1_DSCFG		GENMASK(19, 16)
+#define STM32MP25_SPI_HWCFGR1_DSCFG_16_B	0x0
+#define STM32MP25_SPI_HWCFGR1_DSCFG_32_B	0x1
 
 /* STM32H7 SPI Master Baud Rate min/max divisor */
 #define STM32H7_SPI_MBR_DIV_MIN		(2 << STM32H7_SPI_CFG1_MBR_MIN)
@@ -170,6 +200,14 @@
  */
 #define SPI_DMA_MIN_BYTES	16
 
+/* STM32 SPI driver helpers */
+#define STM32_SPI_MASTER_MODE(stm32_spi) (!(stm32_spi)->slave_mode)
+#define STM32_SPI_SLAVE_MODE(stm32_spi) ((stm32_spi)->slave_mode)
+
+static unsigned int polling_limit_us = 30;
+module_param(polling_limit_us, uint, 0664);
+MODULE_PARM_DESC(polling_limit_us, "maximum time in us to run a transfer in polling mode\n");
+
 /**
  * struct stm32_spi_reg - stm32 SPI register & bitfield desc
  * @reg:		register offset
@@ -190,9 +228,12 @@ struct stm32_spi_reg {
  * @cpol: clock polarity register and polarity bit
  * @cpha: clock phase register and phase bit
  * @lsb_first: LSB transmitted first register and bit
+ * @cs_high: chips select active value
  * @br: baud rate register and bitfields
  * @rx: SPI RX data register
  * @tx: SPI TX data register
+ * @fullcfg: SPI full or limited feature set register
+ * @rdy_en: SPI ready feature register
  */
 struct stm32_spi_regspec {
 	const struct stm32_spi_reg en;
@@ -201,9 +242,12 @@ struct stm32_spi_regspec {
 	const struct stm32_spi_reg cpol;
 	const struct stm32_spi_reg cpha;
 	const struct stm32_spi_reg lsb_first;
+	const struct stm32_spi_reg cs_high;
 	const struct stm32_spi_reg br;
 	const struct stm32_spi_reg rx;
 	const struct stm32_spi_reg tx;
+	const struct stm32_spi_reg fullcfg;
+	const struct stm32_spi_reg rdy_en;
 };
 
 struct stm32_spi;
@@ -226,12 +270,16 @@ struct stm32_spi;
  * @dma_rx_cb: routine to call after DMA RX channel operation is complete
  * @dma_tx_cb: routine to call after DMA TX channel operation is complete
  * @transfer_one_irq: routine to configure interrupts for driver
+ * @transfer_one_poll: routine to perform a transfer via register polling
  * @irq_handler_event: Interrupt handler for SPI controller events
  * @irq_handler_thread: thread of interrupt handler for SPI controller
  * @baud_rate_div_min: minimum baud rate divisor
  * @baud_rate_div_max: maximum baud rate divisor
  * @has_fifo: boolean to know if fifo is used for driver
  * @flags: compatible specific SPI controller flags used at registration time
+ * @set_slave_udr: routine to configure registers to desired slave underrun
+ * behavior (if driver has this functionality)
+ * @prevent_dma_burst: boolean to indicate to prevent DMA burst
  */
 struct stm32_spi_cfg {
 	const struct stm32_spi_regspec *regs;
@@ -247,18 +295,21 @@ struct stm32_spi_cfg {
 	void (*dma_rx_cb)(void *data);
 	void (*dma_tx_cb)(void *data);
 	int (*transfer_one_irq)(struct stm32_spi *spi);
+	int (*transfer_one_poll)(struct stm32_spi *spi);
 	irqreturn_t (*irq_handler_event)(int irq, void *dev_id);
 	irqreturn_t (*irq_handler_thread)(int irq, void *dev_id);
 	unsigned int baud_rate_div_min;
 	unsigned int baud_rate_div_max;
 	bool has_fifo;
 	u16 flags;
+	void (*set_slave_udr)(struct stm32_spi *spi);
+	bool prevent_dma_burst;
 };
 
 /**
  * struct stm32_spi - private data of the SPI controller
  * @dev: driver model representation of the controller
- * @master: controller master interface
+ * @ctrl: controller interface
  * @cfg: compatible configuration data
  * @base: virtual memory area
  * @clk: hw kernel clock feeding the SPI clock generator
@@ -266,6 +317,8 @@ struct stm32_spi_cfg {
  * @lock: prevent I/O concurrent access
  * @irq: SPI controller interrupt line
  * @fifo_size: size of the embedded fifo in bytes
+ * @t_size_max: maximum number of data of one transfer
+ * @feature_set: SPI full or limited feature set
  * @cur_midi: master inter-data idleness in ns
  * @cur_speed: speed configured in Hz
  * @cur_half_period: time of a half bit in us
@@ -281,10 +334,13 @@ struct stm32_spi_cfg {
  * @dma_tx: dma channel for TX transfer
  * @dma_rx: dma channel for RX transfer
  * @phys_addr: SPI registers physical base address
+ * @slave_mode: the controller is configured as SPI slave
+ * @slave_udr_mode: slave underrun behavior
+ * @slave_udr_pattern: slave underrun pattern parameter
  */
 struct stm32_spi {
 	struct device *dev;
-	struct spi_master *master;
+	struct spi_controller *ctrl;
 	const struct stm32_spi_cfg *cfg;
 	void __iomem *base;
 	struct clk *clk;
@@ -292,6 +348,10 @@ struct stm32_spi {
 	spinlock_t lock; /* prevent I/O concurrent access */
 	int irq;
 	unsigned int fifo_size;
+	unsigned int t_size_max;
+	unsigned int feature_set;
+#define STM32_SPI_FEATURE_LIMITED	STM32MP25_SPI_HWCFGR1_FULLCFG_LIMITED	/* 0x0 */
+#define STM32_SPI_FEATURE_FULL		STM32MP25_SPI_HWCFGR1_FULLCFG_FULL	/* 0x1 */
 
 	unsigned int cur_midi;
 	unsigned int cur_speed;
@@ -309,6 +369,10 @@ struct stm32_spi {
 	struct dma_chan *dma_tx;
 	struct dma_chan *dma_rx;
 	dma_addr_t phys_addr;
+
+	bool slave_mode;
+	u32 slave_udr_mode;
+	u32 slave_udr_pattern;
 };
 
 static const struct stm32_spi_regspec stm32f4_spi_regspec = {
@@ -320,10 +384,15 @@ static const struct stm32_spi_regspec stm32f4_spi_regspec = {
 	.cpol = { STM32F4_SPI_CR1, STM32F4_SPI_CR1_CPOL },
 	.cpha = { STM32F4_SPI_CR1, STM32F4_SPI_CR1_CPHA },
 	.lsb_first = { STM32F4_SPI_CR1, STM32F4_SPI_CR1_LSBFRST },
+	.cs_high = {},
 	.br = { STM32F4_SPI_CR1, STM32F4_SPI_CR1_BR, STM32F4_SPI_CR1_BR_SHIFT },
 
 	.rx = { STM32F4_SPI_DR },
 	.tx = { STM32F4_SPI_DR },
+
+	.fullcfg = {},
+
+	.rdy_en = {},
 };
 
 static const struct stm32_spi_regspec stm32h7_spi_regspec = {
@@ -338,11 +407,40 @@ static const struct stm32_spi_regspec stm32h7_spi_regspec = {
 	.cpol = { STM32H7_SPI_CFG2, STM32H7_SPI_CFG2_CPOL },
 	.cpha = { STM32H7_SPI_CFG2, STM32H7_SPI_CFG2_CPHA },
 	.lsb_first = { STM32H7_SPI_CFG2, STM32H7_SPI_CFG2_LSBFRST },
+	.cs_high = { STM32H7_SPI_CFG2, STM32H7_SPI_CFG2_SSIOP },
 	.br = { STM32H7_SPI_CFG1, STM32H7_SPI_CFG1_MBR,
 		STM32H7_SPI_CFG1_MBR_SHIFT },
 
 	.rx = { STM32H7_SPI_RXDR },
 	.tx = { STM32H7_SPI_TXDR },
+
+	.fullcfg = {},
+
+	.rdy_en = {},
+};
+
+static const struct stm32_spi_regspec stm32mp25_spi_regspec = {
+	/* SPI data transfer is enabled but spi_ker_ck is idle.
+	 * CFG1 and CFG2 registers are write protected when SPE is enabled.
+	 */
+	.en = { STM32H7_SPI_CR1, STM32H7_SPI_CR1_SPE },
+
+	.dma_rx_en = { STM32H7_SPI_CFG1, STM32H7_SPI_CFG1_RXDMAEN },
+	.dma_tx_en = { STM32H7_SPI_CFG1, STM32H7_SPI_CFG1_TXDMAEN },
+
+	.cpol = { STM32H7_SPI_CFG2, STM32H7_SPI_CFG2_CPOL },
+	.cpha = { STM32H7_SPI_CFG2, STM32H7_SPI_CFG2_CPHA },
+	.lsb_first = { STM32H7_SPI_CFG2, STM32H7_SPI_CFG2_LSBFRST },
+	.cs_high = { STM32H7_SPI_CFG2, STM32H7_SPI_CFG2_SSIOP },
+	.br = { STM32H7_SPI_CFG1, STM32H7_SPI_CFG1_MBR,
+		STM32H7_SPI_CFG1_MBR_SHIFT },
+
+	.rx = { STM32H7_SPI_RXDR },
+	.tx = { STM32H7_SPI_TXDR },
+
+	.fullcfg = { STM32MP25_SPI_HWCFGR1, STM32MP25_SPI_HWCFGR1_FULLCFG },
+
+	.rdy_en = { STM32H7_SPI_CFG2, STM32MP25_SPI_CFG2_RDIOM },
 };
 
 static inline void stm32_spi_set_bits(struct stm32_spi *spi,
@@ -422,6 +520,28 @@ static int stm32h7_spi_get_bpw_mask(struct stm32_spi *spi)
 }
 
 /**
+ * stm32mp25_spi_get_bpw_mask - Return bits per word mask
+ * @spi: pointer to the spi controller data structure
+ */
+static int stm32mp25_spi_get_bpw_mask(struct stm32_spi *spi)
+{
+	u32 dscfg, max_bpw;
+
+	if (spi->feature_set == STM32_SPI_FEATURE_LIMITED) {
+		dev_dbg(spi->dev, "8-bit or 16-bit data frame supported\n");
+		return SPI_BPW_MASK(8) | SPI_BPW_MASK(16);
+	}
+
+	dscfg = FIELD_GET(STM32MP25_SPI_HWCFGR1_DSCFG,
+			  readl_relaxed(spi->base + STM32MP25_SPI_HWCFGR1));
+	max_bpw = 16;
+	if (dscfg == STM32MP25_SPI_HWCFGR1_DSCFG_32_B)
+		max_bpw = 32;
+	dev_dbg(spi->dev, "%d-bit maximum data frame\n", max_bpw);
+	return SPI_BPW_RANGE_MASK(4, max_bpw);
+}
+
+/**
  * stm32_spi_prepare_mbr - Determine baud rate divisor value
  * @spi: pointer to the spi controller data structure
  * @speed_hz: requested speed
@@ -439,9 +559,9 @@ static int stm32_spi_prepare_mbr(struct stm32_spi *spi, u32 speed_hz,
 	div = DIV_ROUND_CLOSEST(spi->clk_rate & ~0x1, speed_hz);
 
 	/*
-	 * SPI framework set xfer->speed_hz to master->max_speed_hz if
-	 * xfer->speed_hz is greater than master->max_speed_hz, and it returns
-	 * an error when xfer->speed_hz is lower than master->min_speed_hz, so
+	 * SPI framework set xfer->speed_hz to ctrl->max_speed_hz if
+	 * xfer->speed_hz is greater than ctrl->max_speed_hz, and it returns
+	 * an error when xfer->speed_hz is lower than ctrl->min_speed_hz, so
 	 * no need to check it there.
 	 * However, we need to ensure the following calculations.
 	 */
@@ -661,9 +781,9 @@ static void stm32f4_spi_disable(struct stm32_spi *spi)
 	}
 
 	if (spi->cur_usedma && spi->dma_tx)
-		dmaengine_terminate_all(spi->dma_tx);
+		dmaengine_terminate_async(spi->dma_tx);
 	if (spi->cur_usedma && spi->dma_rx)
-		dmaengine_terminate_all(spi->dma_rx);
+		dmaengine_terminate_async(spi->dma_rx);
 
 	stm32_spi_clr_bits(spi, STM32F4_SPI_CR1, STM32F4_SPI_CR1_SPE);
 
@@ -704,9 +824,9 @@ static void stm32h7_spi_disable(struct stm32_spi *spi)
 		udelay(spi->cur_half_period);
 
 	if (spi->cur_usedma && spi->dma_tx)
-		dmaengine_terminate_all(spi->dma_tx);
+		dmaengine_terminate_async(spi->dma_tx);
 	if (spi->cur_usedma && spi->dma_rx)
-		dmaengine_terminate_all(spi->dma_rx);
+		dmaengine_terminate_async(spi->dma_rx);
 
 	stm32_spi_clr_bits(spi, STM32H7_SPI_CR1, STM32H7_SPI_CR1_SPE);
 
@@ -722,19 +842,19 @@ static void stm32h7_spi_disable(struct stm32_spi *spi)
 
 /**
  * stm32_spi_can_dma - Determine if the transfer is eligible for DMA use
- * @master: controller master interface
+ * @ctrl: controller interface
  * @spi_dev: pointer to the spi device
  * @transfer: pointer to spi transfer
  *
  * If driver has fifo and the current transfer size is greater than fifo size,
  * use DMA. Otherwise use DMA for transfer longer than defined DMA min bytes.
  */
-static bool stm32_spi_can_dma(struct spi_master *master,
+static bool stm32_spi_can_dma(struct spi_controller *ctrl,
 			      struct spi_device *spi_dev,
 			      struct spi_transfer *transfer)
 {
 	unsigned int dma_size;
-	struct stm32_spi *spi = spi_master_get_devdata(master);
+	struct stm32_spi *spi = spi_controller_get_devdata(ctrl);
 
 	if (spi->cfg->has_fifo)
 		dma_size = spi->fifo_size;
@@ -750,12 +870,12 @@ static bool stm32_spi_can_dma(struct spi_master *master,
 /**
  * stm32f4_spi_irq_event - Interrupt handler for SPI controller events
  * @irq: interrupt line
- * @dev_id: SPI controller master interface
+ * @dev_id: SPI controller ctrl interface
  */
 static irqreturn_t stm32f4_spi_irq_event(int irq, void *dev_id)
 {
-	struct spi_master *master = dev_id;
-	struct stm32_spi *spi = spi_master_get_devdata(master);
+	struct spi_controller *ctrl = dev_id;
+	struct stm32_spi *spi = spi_controller_get_devdata(ctrl);
 	u32 sr, mask = 0;
 	bool end = false;
 
@@ -838,14 +958,14 @@ end_irq:
 /**
  * stm32f4_spi_irq_thread - Thread of interrupt handler for SPI controller
  * @irq: interrupt line
- * @dev_id: SPI controller master interface
+ * @dev_id: SPI controller interface
  */
 static irqreturn_t stm32f4_spi_irq_thread(int irq, void *dev_id)
 {
-	struct spi_master *master = dev_id;
-	struct stm32_spi *spi = spi_master_get_devdata(master);
+	struct spi_controller *ctrl = dev_id;
+	struct stm32_spi *spi = spi_controller_get_devdata(ctrl);
 
-	spi_finalize_current_transfer(master);
+	spi_finalize_current_transfer(ctrl);
 	stm32f4_spi_disable(spi);
 
 	return IRQ_HANDLED;
@@ -854,12 +974,12 @@ static irqreturn_t stm32f4_spi_irq_thread(int irq, void *dev_id)
 /**
  * stm32h7_spi_irq_thread - Thread of interrupt handler for SPI controller
  * @irq: interrupt line
- * @dev_id: SPI controller master interface
+ * @dev_id: SPI controller interface
  */
 static irqreturn_t stm32h7_spi_irq_thread(int irq, void *dev_id)
 {
-	struct spi_master *master = dev_id;
-	struct stm32_spi *spi = spi_master_get_devdata(master);
+	struct spi_controller *ctrl = dev_id;
+	struct stm32_spi *spi = spi_controller_get_devdata(ctrl);
 	u32 sr, ier, mask;
 	unsigned long flags;
 	bool end = false;
@@ -917,6 +1037,14 @@ static irqreturn_t stm32h7_spi_irq_thread(int irq, void *dev_id)
 		end = true;
 	}
 
+	if (sr & STM32H7_SPI_SR_UDR) {
+		static DEFINE_RATELIMIT_STATE(rs,
+					      DEFAULT_RATELIMIT_INTERVAL * 10,
+					      1);
+		if (__ratelimit(&rs))
+			dev_dbg_ratelimited(spi->dev, "Underrun detected\n");
+	}
+
 	if (sr & STM32H7_SPI_SR_EOT) {
 		if (!spi->cur_usedma && (spi->rx_buf && (spi->rx_len > 0)))
 			stm32h7_spi_read_rxfifo(spi);
@@ -939,7 +1067,7 @@ static irqreturn_t stm32h7_spi_irq_thread(int irq, void *dev_id)
 
 	if (end) {
 		stm32h7_spi_disable(spi);
-		spi_finalize_current_transfer(master);
+		spi_finalize_current_transfer(ctrl);
 	}
 
 	return IRQ_HANDLED;
@@ -947,13 +1075,13 @@ static irqreturn_t stm32h7_spi_irq_thread(int irq, void *dev_id)
 
 /**
  * stm32_spi_prepare_msg - set up the controller to transfer a single message
- * @master: controller master interface
+ * @ctrl: controller interface
  * @msg: pointer to spi message
  */
-static int stm32_spi_prepare_msg(struct spi_master *master,
+static int stm32_spi_prepare_msg(struct spi_controller *ctrl,
 				 struct spi_message *msg)
 {
-	struct stm32_spi *spi = spi_master_get_devdata(master);
+	struct stm32_spi *spi = spi_controller_get_devdata(ctrl);
 	struct spi_device *spi_dev = msg->spi;
 	struct device_node *np = spi_dev->dev.of_node;
 	unsigned long flags;
@@ -979,11 +1107,22 @@ static int stm32_spi_prepare_msg(struct spi_master *master,
 	else
 		clrb |= spi->cfg->regs->lsb_first.mask;
 
-	dev_dbg(spi->dev, "cpol=%d cpha=%d lsb_first=%d cs_high=%d\n",
+	if (STM32_SPI_SLAVE_MODE(spi) && spi_dev->mode & SPI_CS_HIGH)
+		setb |= spi->cfg->regs->cs_high.mask;
+	else
+		clrb |= spi->cfg->regs->cs_high.mask;
+
+	if (spi_dev->mode & SPI_READY)
+		setb |= spi->cfg->regs->rdy_en.mask;
+	else
+		clrb |= spi->cfg->regs->rdy_en.mask;
+
+	dev_dbg(spi->dev, "cpol=%d cpha=%d lsb_first=%d cs_high=%d rdy=%d\n",
 		!!(spi_dev->mode & SPI_CPOL),
 		!!(spi_dev->mode & SPI_CPHA),
 		!!(spi_dev->mode & SPI_LSB_FIRST),
-		!!(spi_dev->mode & SPI_CS_HIGH));
+		!!(spi_dev->mode & SPI_CS_HIGH),
+		!!(spi_dev->mode & SPI_READY));
 
 	/* On STM32H7, messages should not exceed a maximum size setted
 	 * afterward via the set_number_of_data function. In order to
@@ -992,16 +1131,16 @@ static int stm32_spi_prepare_msg(struct spi_master *master,
 	if (spi->cfg->set_number_of_data) {
 		int ret;
 
-		ret = spi_split_transfers_maxsize(master, msg,
-						  STM32H7_SPI_TSIZE_MAX,
-						  GFP_KERNEL | GFP_DMA);
+		ret = spi_split_transfers_maxwords(ctrl, msg,
+						   spi->t_size_max,
+						   GFP_KERNEL | GFP_DMA);
 		if (ret)
 			return ret;
 	}
 
 	spin_lock_irqsave(&spi->lock, flags);
 
-	/* CPOL, CPHA and LSB FIRST bits have common register */
+	/* CPOL, CPHA, LSB FIRST, CS_HIGH and RDY_EN bits have common register */
 	if (clrb || setb)
 		writel_relaxed(
 			(readl_relaxed(spi->base + spi->cfg->regs->cpol.reg) &
@@ -1024,7 +1163,7 @@ static void stm32f4_spi_dma_tx_cb(void *data)
 	struct stm32_spi *spi = data;
 
 	if (spi->cur_comm == SPI_SIMPLEX_TX || spi->cur_comm == SPI_3WIRE_TX) {
-		spi_finalize_current_transfer(spi->master);
+		spi_finalize_current_transfer(spi->ctrl);
 		stm32f4_spi_disable(spi);
 	}
 }
@@ -1039,7 +1178,7 @@ static void stm32_spi_dma_rx_cb(void *data)
 {
 	struct stm32_spi *spi = data;
 
-	spi_finalize_current_transfer(spi->master);
+	spi_finalize_current_transfer(spi->ctrl);
 	spi->cfg->disable(spi);
 }
 
@@ -1047,15 +1186,19 @@ static void stm32_spi_dma_rx_cb(void *data)
  * stm32_spi_dma_config - configure dma slave channel depending on current
  *			  transfer bits_per_word.
  * @spi: pointer to the spi controller data structure
+ * @dma_chan: pointer to the DMA channel
  * @dma_conf: pointer to the dma_slave_config structure
  * @dir: direction of the dma transfer
  */
 static void stm32_spi_dma_config(struct stm32_spi *spi,
+				 struct dma_chan *dma_chan,
 				 struct dma_slave_config *dma_conf,
 				 enum dma_transfer_direction dir)
 {
 	enum dma_slave_buswidth buswidth;
-	u32 maxburst;
+	struct dma_slave_caps caps;
+	u32 maxburst = 1;
+	int ret;
 
 	if (spi->cur_bpw <= 8)
 		buswidth = DMA_SLAVE_BUSWIDTH_1_BYTE;
@@ -1064,15 +1207,14 @@ static void stm32_spi_dma_config(struct stm32_spi *spi,
 	else
 		buswidth = DMA_SLAVE_BUSWIDTH_4_BYTES;
 
-	if (spi->cfg->has_fifo) {
-		/* Valid for DMA Half or Full Fifo threshold */
-		if (spi->cur_fthlv == 2)
-			maxburst = 1;
-		else
-			maxburst = spi->cur_fthlv;
-	} else {
-		maxburst = 1;
-	}
+	/* Valid for DMA Half or Full Fifo threshold */
+	if (!spi->cfg->prevent_dma_burst && spi->cfg->has_fifo && spi->cur_fthlv != 2)
+		maxburst = spi->cur_fthlv;
+
+	/* Get the DMA channel caps, and adjust maxburst if possible */
+	ret = dma_get_slave_caps(dma_chan, &caps);
+	if (!ret)
+		maxburst = min(maxburst, caps.max_burst);
 
 	memset(dma_conf, 0, sizeof(struct dma_slave_config));
 	dma_conf->direction = dir;
@@ -1137,6 +1279,54 @@ static int stm32f4_spi_transfer_one_irq(struct stm32_spi *spi)
 }
 
 /**
+ * stm32h7_spi_transfer_one_poll - transfer a single spi_transfer by direct
+ *				   register access without interrupt usage
+ * @spi: pointer to the spi controller data structure
+ *
+ * It must returns 0 if the transfer is finished or 1 if the transfer is still
+ * in progress.
+ */
+static int stm32h7_spi_transfer_one_poll(struct stm32_spi *spi)
+{
+	unsigned long flags;
+	u32 sr;
+
+	spin_lock_irqsave(&spi->lock, flags);
+
+	stm32_spi_enable(spi);
+
+	/* Be sure to have data in fifo before starting data transfer */
+	if (spi->tx_buf)
+		stm32h7_spi_write_txfifo(spi);
+
+	if (STM32_SPI_MASTER_MODE(spi))
+		stm32_spi_set_bits(spi, STM32H7_SPI_CR1, STM32H7_SPI_CR1_CSTART);
+
+	sr = readl_relaxed(spi->base + STM32H7_SPI_SR);
+	/* Keep writing / reading while waiting for the end of transfer */
+	while (spi->tx_len || spi->rx_len || !(sr & STM32H7_SPI_SR_EOT)) {
+		if (spi->rx_len && (sr & (STM32H7_SPI_SR_RXP | STM32H7_SPI_SR_RXWNE)))
+			stm32h7_spi_read_rxfifo(spi);
+
+		if (spi->tx_len && (sr & STM32H7_SPI_SR_TXP))
+			stm32h7_spi_write_txfifo(spi);
+
+		sr = readl_relaxed(spi->base + STM32H7_SPI_SR);
+
+		/* Clear suspension bit if necessary */
+		if (sr & STM32H7_SPI_SR_SUSP)
+			writel_relaxed(sr & STM32H7_SPI_SR_SUSP, spi->base + STM32H7_SPI_IFCR);
+	}
+
+	spin_unlock_irqrestore(&spi->lock, flags);
+
+	stm32h7_spi_disable(spi);
+	spi_finalize_current_transfer(spi->ctrl);
+
+	return 0;
+}
+
+/**
  * stm32h7_spi_transfer_one_irq - transfer a single spi_transfer using
  *				  interrupts
  * @spi: pointer to the spi controller data structure
@@ -1169,7 +1359,11 @@ static int stm32h7_spi_transfer_one_irq(struct stm32_spi *spi)
 	if (spi->tx_buf)
 		stm32h7_spi_write_txfifo(spi);
 
-	stm32_spi_set_bits(spi, STM32H7_SPI_CR1, STM32H7_SPI_CR1_CSTART);
+	if (STM32_SPI_SLAVE_MODE(spi) && spi->slave_udr_mode != SPI_NO_ACTION)
+		ier |= STM32H7_SPI_IER_UDRIE;
+
+	if (STM32_SPI_MASTER_MODE(spi))
+		stm32_spi_set_bits(spi, STM32H7_SPI_CR1, STM32H7_SPI_CR1_CSTART);
 
 	writel_relaxed(ier, spi->base + STM32H7_SPI_IER);
 
@@ -1212,11 +1406,15 @@ static void stm32h7_spi_transfer_one_dma_start(struct stm32_spi *spi)
 	if (spi->cur_comm == SPI_SIMPLEX_TX || spi->cur_comm == SPI_3WIRE_TX)
 		ier |= STM32H7_SPI_IER_EOTIE | STM32H7_SPI_IER_TXTFIE;
 
+	if (STM32_SPI_SLAVE_MODE(spi) && spi->slave_udr_mode != SPI_NO_ACTION)
+		ier |= STM32H7_SPI_IER_UDRIE;
+
 	stm32_spi_set_bits(spi, STM32H7_SPI_IER, ier);
 
 	stm32_spi_enable(spi);
 
-	stm32_spi_set_bits(spi, STM32H7_SPI_CR1, STM32H7_SPI_CR1_CSTART);
+	if (STM32_SPI_MASTER_MODE(spi))
+		stm32_spi_set_bits(spi, STM32H7_SPI_CR1, STM32H7_SPI_CR1_CSTART);
 }
 
 /**
@@ -1238,7 +1436,7 @@ static int stm32_spi_transfer_one_dma(struct stm32_spi *spi,
 
 	rx_dma_desc = NULL;
 	if (spi->rx_buf && spi->dma_rx) {
-		stm32_spi_dma_config(spi, &rx_dma_conf, DMA_DEV_TO_MEM);
+		stm32_spi_dma_config(spi, spi->dma_rx, &rx_dma_conf, DMA_DEV_TO_MEM);
 		dmaengine_slave_config(spi->dma_rx, &rx_dma_conf);
 
 		/* Enable Rx DMA request */
@@ -1254,7 +1452,7 @@ static int stm32_spi_transfer_one_dma(struct stm32_spi *spi,
 
 	tx_dma_desc = NULL;
 	if (spi->tx_buf && spi->dma_tx) {
-		stm32_spi_dma_config(spi, &tx_dma_conf, DMA_MEM_TO_DEV);
+		stm32_spi_dma_config(spi, spi->dma_tx, &tx_dma_conf, DMA_MEM_TO_DEV);
 		dmaengine_slave_config(spi->dma_tx, &tx_dma_conf);
 
 		tx_dma_desc = dmaengine_prep_slave_sg(
@@ -1310,7 +1508,7 @@ static int stm32_spi_transfer_one_dma(struct stm32_spi *spi,
 
 dma_submit_error:
 	if (spi->dma_rx)
-		dmaengine_terminate_all(spi->dma_rx);
+		dmaengine_terminate_sync(spi->dma_rx);
 
 dma_desc_error:
 	stm32_spi_clr_bits(spi, spi->cfg->regs->dma_rx_en.reg,
@@ -1486,11 +1684,12 @@ static void stm32h7_spi_data_idleness(struct stm32_spi *spi, u32 len)
 	cfg2_clrb |= STM32H7_SPI_CFG2_MIDI;
 	if ((len > 1) && (spi->cur_midi > 0)) {
 		u32 sck_period_ns = DIV_ROUND_UP(NSEC_PER_SEC, spi->cur_speed);
-		u32 midi = min_t(u32,
-				 DIV_ROUND_UP(spi->cur_midi, sck_period_ns),
-				 FIELD_GET(STM32H7_SPI_CFG2_MIDI,
-				 STM32H7_SPI_CFG2_MIDI));
+		u32 midi = DIV_ROUND_UP(spi->cur_midi, sck_period_ns);
 
+		if ((spi->cur_bpw + midi) < 8)
+			midi = 8 - spi->cur_bpw;
+
+		midi = min_t(u32, midi, FIELD_MAX(STM32H7_SPI_CFG2_MIDI));
 
 		dev_dbg(spi->dev, "period=%dns, midi=%d(=%dns)\n",
 			sck_period_ns, midi, midi * sck_period_ns);
@@ -1509,7 +1708,7 @@ static void stm32h7_spi_data_idleness(struct stm32_spi *spi, u32 len)
  */
 static int stm32h7_spi_number_of_data(struct stm32_spi *spi, u32 nb_words)
 {
-	if (nb_words <= STM32H7_SPI_TSIZE_MAX) {
+	if (nb_words <= spi->t_size_max) {
 		writel_relaxed(FIELD_PREP(STM32H7_SPI_CR2_TSIZE, nb_words),
 			       spi->base + STM32H7_SPI_CR2);
 	} else {
@@ -1517,6 +1716,53 @@ static int stm32h7_spi_number_of_data(struct stm32_spi *spi, u32 nb_words)
 	}
 
 	return 0;
+}
+
+/**
+ * stm32h7_spi_set_slave_udr - configure slave underrun detection and reaction
+ * @spi: pointer to the spi controller data structure
+ */
+static void stm32h7_spi_set_slave_udr(struct stm32_spi *spi)
+{
+	u32 max_udr_ptrn, udr_ptrn, cfg1_setb = 0;
+
+	if (spi->slave_udr_mode == SPI_NO_ACTION)
+		return;
+
+	switch (spi->slave_udr_mode) {
+	case SPI_SEND_PATTERN:
+		max_udr_ptrn = (1 << spi->cur_bpw) - 1;
+		if (spi->slave_udr_pattern > max_udr_ptrn) {
+			udr_ptrn = spi->slave_udr_pattern & max_udr_ptrn;
+			dev_warn(spi->dev,
+				 "force slave underrun pattern to data width (> 0x%x, set 0x%x)\n",
+				 max_udr_ptrn, udr_ptrn);
+		} else {
+			udr_ptrn = spi->slave_udr_pattern;
+			dev_dbg(spi->dev, "spi slave underrun: send pattern (0x%x)\n",
+				spi->slave_udr_pattern);
+		}
+		writel_relaxed(udr_ptrn, spi->base + STM32H7_SPI_UDRDR);
+		cfg1_setb |= FIELD_PREP(STM32H7_SPI_CFG1_UDRCFG, STM32H7_SPI_CFG1_UDRCFG_PTRN);
+		break;
+	case SPI_REPEAT_LAST_RECEIVED_DATA:
+		cfg1_setb |= FIELD_PREP(STM32H7_SPI_CFG1_UDRCFG, STM32H7_SPI_CFG1_UDRCFG_LAST_R);
+		dev_dbg(spi->dev, "spi slave underrun: repeat received data\n");
+		break;
+	case SPI_REPEAT_LAST_TRANSMITTED_DATA:
+		cfg1_setb |= FIELD_PREP(STM32H7_SPI_CFG1_UDRCFG, STM32H7_SPI_CFG1_UDRCFG_LAST_T);
+		dev_dbg(spi->dev, "spi slave underrun: repeat transmitted data\n");
+		break;
+	default:
+		dev_warn(spi->dev, "slave underrun detection disabled\n");
+		spi->slave_udr_mode = SPI_NO_ACTION;
+	}
+
+	if (spi->slave_udr_mode != SPI_NO_ACTION) {
+		cfg1_setb |= FIELD_PREP(STM32H7_SPI_CFG1_UDRDET, STM32H7_SPI_CFG1_UDRDET_LAST);
+
+		stm32_spi_set_bits(spi,  STM32H7_SPI_CFG1, cfg1_setb);
+	}
 }
 
 /**
@@ -1543,17 +1789,26 @@ static int stm32_spi_transfer_one_setup(struct stm32_spi *spi,
 	spi->cur_bpw = transfer->bits_per_word;
 	spi->cfg->set_bpw(spi);
 
-	/* Update spi->cur_speed with real clock speed */
-	mbr = stm32_spi_prepare_mbr(spi, transfer->speed_hz,
-				    spi->cfg->baud_rate_div_min,
-				    spi->cfg->baud_rate_div_max);
-	if (mbr < 0) {
-		ret = mbr;
-		goto out;
+	if (spi_dev->mode & SPI_READY && spi->cur_bpw < 8) {
+		writel_relaxed(readl_relaxed(spi->base + spi->cfg->regs->rdy_en.reg) &
+				~spi->cfg->regs->rdy_en.mask,
+					spi->base + spi->cfg->regs->rdy_en.reg);
+		dev_dbg(spi->dev, "RDY logic disabled as bits per word < 8\n");
 	}
 
-	transfer->speed_hz = spi->cur_speed;
-	stm32_spi_set_mbr(spi, mbr);
+	/* Update spi->cur_speed with real clock speed */
+	if (STM32_SPI_MASTER_MODE(spi)) {
+		mbr = stm32_spi_prepare_mbr(spi, transfer->speed_hz,
+					    spi->cfg->baud_rate_div_min,
+					    spi->cfg->baud_rate_div_max);
+		if (mbr < 0) {
+			ret = mbr;
+			goto out;
+		}
+
+		transfer->speed_hz = spi->cur_speed;
+		stm32_spi_set_mbr(spi, mbr);
+	}
 
 	comm_type = stm32_spi_communication_type(spi_dev, transfer);
 	ret = spi->cfg->set_mode(spi, comm_type);
@@ -1562,7 +1817,7 @@ static int stm32_spi_transfer_one_setup(struct stm32_spi *spi,
 
 	spi->cur_comm = comm_type;
 
-	if (spi->cfg->set_data_idleness)
+	if (STM32_SPI_MASTER_MODE(spi) && spi->cfg->set_data_idleness)
 		spi->cfg->set_data_idleness(spi, transfer->len);
 
 	if (spi->cur_bpw <= 8)
@@ -1578,12 +1833,16 @@ static int stm32_spi_transfer_one_setup(struct stm32_spi *spi,
 			goto out;
 	}
 
+	if (STM32_SPI_SLAVE_MODE(spi) && spi->cfg->set_slave_udr)
+		spi->cfg->set_slave_udr(spi);
+
 	dev_dbg(spi->dev, "transfer communication mode set to %d\n",
 		spi->cur_comm);
 	dev_dbg(spi->dev,
 		"data frame of %d-bit, data packet of %d data frames\n",
 		spi->cur_bpw, spi->cur_fthlv);
-	dev_dbg(spi->dev, "speed set to %dHz\n", spi->cur_speed);
+	if (STM32_SPI_MASTER_MODE(spi))
+		dev_dbg(spi->dev, "speed set to %dHz\n", spi->cur_speed);
 	dev_dbg(spi->dev, "transfer of %d bytes (%d data frames)\n",
 		spi->cur_xferlen, nb_words);
 	dev_dbg(spi->dev, "dma %s\n",
@@ -1596,19 +1855,37 @@ out:
 }
 
 /**
+ * stm32_spi_can_poll - detect if poll based transfer is appropriate
+ * @spi: pointer to the spi controller data structure
+ *
+ * Returns true is poll is more appropriate, false otherwise.
+ */
+static bool stm32_spi_can_poll(struct stm32_spi *spi)
+{
+	unsigned long hz_per_byte, byte_limit;
+
+	/* Evaluate the transfer time and use polling if applicable */
+	hz_per_byte = polling_limit_us ?
+		      DIV_ROUND_UP(8 * USEC_PER_SEC, polling_limit_us) : 0;
+	byte_limit = hz_per_byte ? spi->cur_speed / hz_per_byte : 1;
+
+	return (spi->cur_xferlen < byte_limit) ? true : false;
+}
+
+/**
  * stm32_spi_transfer_one - transfer a single spi_transfer
- * @master: controller master interface
+ * @ctrl: controller interface
  * @spi_dev: pointer to the spi device
  * @transfer: pointer to spi transfer
  *
  * It must return 0 if the transfer is finished or 1 if the transfer is still
  * in progress.
  */
-static int stm32_spi_transfer_one(struct spi_master *master,
+static int stm32_spi_transfer_one(struct spi_controller *ctrl,
 				  struct spi_device *spi_dev,
 				  struct spi_transfer *transfer)
 {
-	struct stm32_spi *spi = spi_master_get_devdata(master);
+	struct stm32_spi *spi = spi_controller_get_devdata(ctrl);
 	int ret;
 
 	spi->tx_buf = transfer->tx_buf;
@@ -1616,8 +1893,8 @@ static int stm32_spi_transfer_one(struct spi_master *master,
 	spi->tx_len = spi->tx_buf ? transfer->len : 0;
 	spi->rx_len = spi->rx_buf ? transfer->len : 0;
 
-	spi->cur_usedma = (master->can_dma &&
-			   master->can_dma(master, spi_dev, transfer));
+	spi->cur_usedma = (ctrl->can_dma &&
+			   ctrl->can_dma(ctrl, spi_dev, transfer));
 
 	ret = stm32_spi_transfer_one_setup(spi, spi_dev, transfer);
 	if (ret) {
@@ -1627,19 +1904,21 @@ static int stm32_spi_transfer_one(struct spi_master *master,
 
 	if (spi->cur_usedma)
 		return stm32_spi_transfer_one_dma(spi, transfer);
+	else if (spi->cfg->transfer_one_poll && stm32_spi_can_poll(spi))
+		return spi->cfg->transfer_one_poll(spi);
 	else
 		return spi->cfg->transfer_one_irq(spi);
 }
 
 /**
  * stm32_spi_unprepare_msg - relax the hardware
- * @master: controller master interface
+ * @ctrl: controller interface
  * @msg: pointer to the spi message
  */
-static int stm32_spi_unprepare_msg(struct spi_master *master,
+static int stm32_spi_unprepare_msg(struct spi_controller *ctrl,
 				   struct spi_message *msg)
 {
-	struct stm32_spi *spi = spi_master_get_devdata(master);
+	struct stm32_spi *spi = spi_controller_get_devdata(ctrl);
 
 	spi->cfg->disable(spi);
 
@@ -1678,12 +1957,13 @@ static int stm32f4_spi_config(struct stm32_spi *spi)
 }
 
 /**
- * stm32h7_spi_config - Configure SPI controller as SPI master
+ * stm32h7_spi_config - Configure SPI controller
  * @spi: pointer to the spi controller data structure
  */
 static int stm32h7_spi_config(struct stm32_spi *spi)
 {
 	unsigned long flags;
+	u32 cr1 = 0, cfg2 = 0;
 
 	spin_lock_irqsave(&spi->lock, flags);
 
@@ -1691,24 +1971,28 @@ static int stm32h7_spi_config(struct stm32_spi *spi)
 	stm32_spi_clr_bits(spi, STM32H7_SPI_I2SCFGR,
 			   STM32H7_SPI_I2SCFGR_I2SMOD);
 
-	/*
-	 * - SS input value high
-	 * - transmitter half duplex direction
-	 * - automatic communication suspend when RX-Fifo is full
-	 */
-	stm32_spi_set_bits(spi, STM32H7_SPI_CR1, STM32H7_SPI_CR1_SSI |
-						 STM32H7_SPI_CR1_HDDIR |
-						 STM32H7_SPI_CR1_MASRX);
+	if (STM32_SPI_SLAVE_MODE(spi)) {
+		/* Use native slave select */
+		cfg2 &= ~STM32H7_SPI_CFG2_SSM;
+	} else {
+		/*
+		 * - Transmitter half duplex direction
+		 * - Automatic communication suspend when RX-Fifo is full
+		 * - SS input value high
+		 */
+		cr1 |= STM32H7_SPI_CR1_HDDIR | STM32H7_SPI_CR1_MASRX | STM32H7_SPI_CR1_SSI;
 
-	/*
-	 * - Set the master mode (default Motorola mode)
-	 * - Consider 1 master/n slaves configuration and
-	 *   SS input value is determined by the SSI bit
-	 * - keep control of all associated GPIOs
-	 */
-	stm32_spi_set_bits(spi, STM32H7_SPI_CFG2, STM32H7_SPI_CFG2_MASTER |
-						  STM32H7_SPI_CFG2_SSM |
-						  STM32H7_SPI_CFG2_AFCNTR);
+		/*
+		 * - Set the master mode (default Motorola mode)
+		 * - Consider 1 master/n slaves configuration and
+		 *   SS input value is determined by the SSI bit
+		 * - keep control of all associated GPIOs
+		 */
+		cfg2 |= STM32H7_SPI_CFG2_MASTER | STM32H7_SPI_CFG2_SSM | STM32H7_SPI_CFG2_AFCNTR;
+	}
+
+	stm32_spi_set_bits(spi, STM32H7_SPI_CR1, cr1);
+	stm32_spi_set_bits(spi, STM32H7_SPI_CFG2, cfg2);
 
 	spin_unlock_irqrestore(&spi->lock, flags);
 
@@ -1751,37 +2035,110 @@ static const struct stm32_spi_cfg stm32h7_spi_cfg = {
 	 * SPI access hence handling is performed within the SPI interrupt
 	 */
 	.transfer_one_irq = stm32h7_spi_transfer_one_irq,
+	.transfer_one_poll = stm32h7_spi_transfer_one_poll,
 	.irq_handler_thread = stm32h7_spi_irq_thread,
 	.baud_rate_div_min = STM32H7_SPI_MBR_DIV_MIN,
 	.baud_rate_div_max = STM32H7_SPI_MBR_DIV_MAX,
 	.has_fifo = true,
+	.set_slave_udr = stm32h7_spi_set_slave_udr,
+};
+
+/*
+ * STM32MP2 is compatible with the STM32H7 except:
+ * - enforce the DMA maxburst value to 1
+ * - spi8 have limited feature set (TSIZE_MAX = 1024, BPW of 8 OR 16)
+ */
+static const struct stm32_spi_cfg stm32mp25_spi_cfg = {
+	.regs = &stm32mp25_spi_regspec,
+	.get_fifo_size = stm32h7_spi_get_fifo_size,
+	.get_bpw_mask = stm32mp25_spi_get_bpw_mask,
+	.disable = stm32h7_spi_disable,
+	.config = stm32h7_spi_config,
+	.set_bpw = stm32h7_spi_set_bpw,
+	.set_mode = stm32h7_spi_set_mode,
+	.set_data_idleness = stm32h7_spi_data_idleness,
+	.set_number_of_data = stm32h7_spi_number_of_data,
+	.transfer_one_dma_start = stm32h7_spi_transfer_one_dma_start,
+	.dma_rx_cb = stm32_spi_dma_rx_cb,
+	/*
+	 * dma_tx_cb is not necessary since in case of TX, dma is followed by
+	 * SPI access hence handling is performed within the SPI interrupt
+	 */
+	.transfer_one_irq = stm32h7_spi_transfer_one_irq,
+	.transfer_one_poll = stm32h7_spi_transfer_one_poll,
+	.irq_handler_thread = stm32h7_spi_irq_thread,
+	.baud_rate_div_min = STM32H7_SPI_MBR_DIV_MIN,
+	.baud_rate_div_max = STM32H7_SPI_MBR_DIV_MAX,
+	.has_fifo = true,
+	.prevent_dma_burst = true,
 };
 
 static const struct of_device_id stm32_spi_of_match[] = {
+	{ .compatible = "st,stm32mp25-spi", .data = (void *)&stm32mp25_spi_cfg },
 	{ .compatible = "st,stm32h7-spi", .data = (void *)&stm32h7_spi_cfg },
 	{ .compatible = "st,stm32f4-spi", .data = (void *)&stm32f4_spi_cfg },
 	{},
 };
 MODULE_DEVICE_TABLE(of, stm32_spi_of_match);
 
+static int stm32h7_spi_slave_abort(struct spi_controller *ctrl)
+{
+	spi_finalize_current_transfer(ctrl);
+
+	return 0;
+}
+
+static void stm32h7_spi_parse_slave_config(struct stm32_spi *spi, struct device_node *np)
+{
+	u32 udr_configs[2] = { 0, 0 };
+	int count, ret;
+
+	count = of_property_count_elems_of_size(np, "st,spi-slave-underrun", sizeof(u32));
+	if (count <= 0) {
+		if (count != -EINVAL)
+			dev_err(spi->dev, "Invalid st,spi-slave-underrun property\n");
+		return;
+	}
+
+	ret = of_property_read_u32_array(np, "st,spi-slave-underrun", udr_configs, count);
+	if (ret)
+		return;
+
+	spi->slave_udr_mode = udr_configs[0];
+	if (spi->slave_udr_mode == SPI_SEND_PATTERN) {
+		if (count > 1)
+			spi->slave_udr_pattern = udr_configs[1];
+		else
+			dev_warn(spi->dev, "Missing pattern in st,spi-slave-underrun property\n");
+	}
+}
+
 static int stm32_spi_probe(struct platform_device *pdev)
 {
-	struct spi_master *master;
+	struct spi_controller *ctrl;
 	struct stm32_spi *spi;
 	struct resource *res;
 	struct reset_control *rst;
+	struct device_node *np = pdev->dev.of_node;
+	bool slave_mode;
 	int ret;
 
-	master = devm_spi_alloc_master(&pdev->dev, sizeof(struct stm32_spi));
-	if (!master) {
-		dev_err(&pdev->dev, "spi master allocation failed\n");
+	slave_mode = of_property_read_bool(np, "spi-slave");
+
+	if (slave_mode)
+		ctrl = devm_spi_alloc_slave(&pdev->dev, sizeof(struct stm32_spi));
+	else
+		ctrl = devm_spi_alloc_master(&pdev->dev, sizeof(struct stm32_spi));
+	if (!ctrl) {
+		dev_err(&pdev->dev, "spi controller allocation failed\n");
 		return -ENOMEM;
 	}
-	platform_set_drvdata(pdev, master);
+	platform_set_drvdata(pdev, ctrl);
 
-	spi = spi_master_get_devdata(master);
+	spi = spi_controller_get_devdata(ctrl);
 	spi->dev = &pdev->dev;
-	spi->master = master;
+	spi->ctrl = ctrl;
+	spi->slave_mode = slave_mode;
 	spin_lock_init(&spi->lock);
 
 	spi->cfg = (const struct stm32_spi_cfg *)
@@ -1803,12 +2160,15 @@ static int stm32_spi_probe(struct platform_device *pdev)
 	ret = devm_request_threaded_irq(&pdev->dev, spi->irq,
 					spi->cfg->irq_handler_event,
 					spi->cfg->irq_handler_thread,
-					IRQF_ONESHOT, pdev->name, master);
+					IRQF_ONESHOT, pdev->name, ctrl);
 	if (ret) {
 		dev_err(&pdev->dev, "irq%d request failed: %d\n", spi->irq,
 			ret);
 		return ret;
 	}
+
+	if (STM32_SPI_SLAVE_MODE(spi))
+		stm32h7_spi_parse_slave_config(spi, np);
 
 	spi->clk = devm_clk_get(&pdev->dev, NULL);
 	if (IS_ERR(spi->clk)) {
@@ -1845,6 +2205,22 @@ static int stm32_spi_probe(struct platform_device *pdev)
 	if (spi->cfg->has_fifo)
 		spi->fifo_size = spi->cfg->get_fifo_size(spi);
 
+	spi->feature_set = STM32_SPI_FEATURE_FULL;
+	if (spi->cfg->regs->fullcfg.reg) {
+		spi->feature_set =
+			FIELD_GET(STM32MP25_SPI_HWCFGR1_FULLCFG,
+				  readl_relaxed(spi->base + spi->cfg->regs->fullcfg.reg));
+
+		dev_dbg(spi->dev, "%s feature set\n",
+			spi->feature_set == STM32_SPI_FEATURE_FULL ? "full" : "limited");
+	}
+
+	/* Only for STM32H7 and after */
+	spi->t_size_max = spi->feature_set == STM32_SPI_FEATURE_FULL ?
+				STM32H7_SPI_TSIZE_MAX :
+				STM32MP25_SPI_TSIZE_MAX_LIMITED;
+	dev_dbg(spi->dev, "one message max size %d\n", spi->t_size_max);
+
 	ret = spi->cfg->config(spi);
 	if (ret) {
 		dev_err(&pdev->dev, "controller configuration failed: %d\n",
@@ -1852,19 +2228,21 @@ static int stm32_spi_probe(struct platform_device *pdev)
 		goto err_clk_disable;
 	}
 
-	master->dev.of_node = pdev->dev.of_node;
-	master->auto_runtime_pm = true;
-	master->bus_num = pdev->id;
-	master->mode_bits = SPI_CPHA | SPI_CPOL | SPI_CS_HIGH | SPI_LSB_FIRST |
-			    SPI_3WIRE;
-	master->bits_per_word_mask = spi->cfg->get_bpw_mask(spi);
-	master->max_speed_hz = spi->clk_rate / spi->cfg->baud_rate_div_min;
-	master->min_speed_hz = spi->clk_rate / spi->cfg->baud_rate_div_max;
-	master->use_gpio_descriptors = true;
-	master->prepare_message = stm32_spi_prepare_msg;
-	master->transfer_one = stm32_spi_transfer_one;
-	master->unprepare_message = stm32_spi_unprepare_msg;
-	master->flags = spi->cfg->flags;
+	ctrl->dev.of_node = pdev->dev.of_node;
+	ctrl->auto_runtime_pm = true;
+	ctrl->bus_num = pdev->id;
+	ctrl->mode_bits = SPI_CPHA | SPI_CPOL | SPI_CS_HIGH | SPI_LSB_FIRST |
+			  SPI_3WIRE | SPI_READY;
+	ctrl->bits_per_word_mask = spi->cfg->get_bpw_mask(spi);
+	ctrl->max_speed_hz = spi->clk_rate / spi->cfg->baud_rate_div_min;
+	ctrl->min_speed_hz = spi->clk_rate / spi->cfg->baud_rate_div_max;
+	ctrl->use_gpio_descriptors = true;
+	ctrl->prepare_message = stm32_spi_prepare_msg;
+	ctrl->transfer_one = stm32_spi_transfer_one;
+	ctrl->unprepare_message = stm32_spi_unprepare_msg;
+	ctrl->flags = spi->cfg->flags;
+	if (STM32_SPI_SLAVE_MODE(spi))
+		ctrl->slave_abort = stm32h7_spi_slave_abort;
 
 	spi->dma_tx = dma_request_chan(spi->dev, "tx");
 	if (IS_ERR(spi->dma_tx)) {
@@ -1875,7 +2253,7 @@ static int stm32_spi_probe(struct platform_device *pdev)
 
 		dev_warn(&pdev->dev, "failed to request tx dma channel\n");
 	} else {
-		master->dma_tx = spi->dma_tx;
+		ctrl->dma_tx = spi->dma_tx;
 	}
 
 	spi->dma_rx = dma_request_chan(spi->dev, "rx");
@@ -1887,11 +2265,11 @@ static int stm32_spi_probe(struct platform_device *pdev)
 
 		dev_warn(&pdev->dev, "failed to request rx dma channel\n");
 	} else {
-		master->dma_rx = spi->dma_rx;
+		ctrl->dma_rx = spi->dma_rx;
 	}
 
 	if (spi->dma_tx || spi->dma_rx)
-		master->can_dma = stm32_spi_can_dma;
+		ctrl->can_dma = stm32_spi_can_dma;
 
 	pm_runtime_set_autosuspend_delay(&pdev->dev,
 					 STM32_SPI_AUTOSUSPEND_DELAY);
@@ -1900,9 +2278,9 @@ static int stm32_spi_probe(struct platform_device *pdev)
 	pm_runtime_get_noresume(&pdev->dev);
 	pm_runtime_enable(&pdev->dev);
 
-	ret = spi_register_master(master);
+	ret = spi_register_controller(ctrl);
 	if (ret) {
-		dev_err(&pdev->dev, "spi master registration failed: %d\n",
+		dev_err(&pdev->dev, "spi controller registration failed: %d\n",
 			ret);
 		goto err_pm_disable;
 	}
@@ -1910,7 +2288,8 @@ static int stm32_spi_probe(struct platform_device *pdev)
 	pm_runtime_mark_last_busy(&pdev->dev);
 	pm_runtime_put_autosuspend(&pdev->dev);
 
-	dev_info(&pdev->dev, "driver initialized\n");
+	dev_info(&pdev->dev, "driver initialized (%s mode)\n",
+		 STM32_SPI_MASTER_MODE(spi) ? "master" : "slave");
 
 	return 0;
 
@@ -1932,12 +2311,12 @@ err_clk_disable:
 
 static int stm32_spi_remove(struct platform_device *pdev)
 {
-	struct spi_master *master = platform_get_drvdata(pdev);
-	struct stm32_spi *spi = spi_master_get_devdata(master);
+	struct spi_controller *ctrl = platform_get_drvdata(pdev);
+	struct stm32_spi *spi = spi_controller_get_devdata(ctrl);
 
 	pm_runtime_get_sync(&pdev->dev);
 
-	spi_unregister_master(master);
+	spi_unregister_controller(ctrl);
 	spi->cfg->disable(spi);
 
 	pm_runtime_disable(&pdev->dev);
@@ -1945,10 +2324,10 @@ static int stm32_spi_remove(struct platform_device *pdev)
 	pm_runtime_set_suspended(&pdev->dev);
 	pm_runtime_dont_use_autosuspend(&pdev->dev);
 
-	if (master->dma_tx)
-		dma_release_channel(master->dma_tx);
-	if (master->dma_rx)
-		dma_release_channel(master->dma_rx);
+	if (ctrl->dma_tx)
+		dma_release_channel(ctrl->dma_tx);
+	if (ctrl->dma_rx)
+		dma_release_channel(ctrl->dma_rx);
 
 	clk_disable_unprepare(spi->clk);
 
@@ -1960,8 +2339,8 @@ static int stm32_spi_remove(struct platform_device *pdev)
 
 static int __maybe_unused stm32_spi_runtime_suspend(struct device *dev)
 {
-	struct spi_master *master = dev_get_drvdata(dev);
-	struct stm32_spi *spi = spi_master_get_devdata(master);
+	struct spi_controller *ctrl = dev_get_drvdata(dev);
+	struct stm32_spi *spi = spi_controller_get_devdata(ctrl);
 
 	clk_disable_unprepare(spi->clk);
 
@@ -1970,8 +2349,8 @@ static int __maybe_unused stm32_spi_runtime_suspend(struct device *dev)
 
 static int __maybe_unused stm32_spi_runtime_resume(struct device *dev)
 {
-	struct spi_master *master = dev_get_drvdata(dev);
-	struct stm32_spi *spi = spi_master_get_devdata(master);
+	struct spi_controller *ctrl = dev_get_drvdata(dev);
+	struct stm32_spi *spi = spi_controller_get_devdata(ctrl);
 	int ret;
 
 	ret = pinctrl_pm_select_default_state(dev);
@@ -1983,10 +2362,10 @@ static int __maybe_unused stm32_spi_runtime_resume(struct device *dev)
 
 static int __maybe_unused stm32_spi_suspend(struct device *dev)
 {
-	struct spi_master *master = dev_get_drvdata(dev);
+	struct spi_controller *ctrl = dev_get_drvdata(dev);
 	int ret;
 
-	ret = spi_master_suspend(master);
+	ret = spi_controller_suspend(ctrl);
 	if (ret)
 		return ret;
 
@@ -1995,15 +2374,15 @@ static int __maybe_unused stm32_spi_suspend(struct device *dev)
 
 static int __maybe_unused stm32_spi_resume(struct device *dev)
 {
-	struct spi_master *master = dev_get_drvdata(dev);
-	struct stm32_spi *spi = spi_master_get_devdata(master);
+	struct spi_controller *ctrl = dev_get_drvdata(dev);
+	struct stm32_spi *spi = spi_controller_get_devdata(ctrl);
 	int ret;
 
 	ret = pm_runtime_force_resume(dev);
 	if (ret)
 		return ret;
 
-	ret = spi_master_resume(master);
+	ret = spi_controller_resume(ctrl);
 	if (ret) {
 		clk_disable_unprepare(spi->clk);
 		return ret;

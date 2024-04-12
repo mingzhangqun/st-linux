@@ -27,12 +27,18 @@ allOf:
     then:
       properties:
         st,spi-midi-ns: false
+        spi-slave: false
+        st,spi-slave-underrun: false
 
 properties:
+  "#address-cells": true
+  "#size-cells": true
+
   compatible:
     enum:
       - st,stm32f4-spi
       - st,stm32h7-spi
+      - st,stm32mp25-spi
 
   reg:
     maxItems: 1
@@ -44,6 +50,9 @@ properties:
     maxItems: 1
 
   resets:
+    maxItems: 1
+
+  power-domains:
     maxItems: 1
 
   dmas:
@@ -59,6 +68,29 @@ properties:
       - const: rx
       - const: tx
 
+  spi-slave:
+    description:
+      The SPI controller acts as a slave, instead of a master.
+
+  cs-gpios:
+    description:
+      In case of spi-slave not defined, cs-gpios behave as defined in
+      spi-controller.yaml.
+      In case of spi-slave defined, if <0>, indicate that SS should be
+      detected via the dedicated HW pin
+
+  st,spi-slave-underrun:
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    description:
+      First parameter enables and selects slave underrun reaction.
+      Refer to "dt-bindings/spi/spi-stm32.h" for the supported values.
+      Second parameter is the pattern in case of SPI_SEND_PATTERN mode.
+
+  feature-domains:
+    $ref: /schemas/types.yaml#/definitions/phandle-array
+    description: |
+      Phandle to the rifsc device to check access right.
+
 patternProperties:
   "^[a-zA-Z][a-zA-Z0-9,+\\-._]{0,63}@[0-9a-f]+$":
     type: object
@@ -67,7 +99,7 @@ patternProperties:
     properties:
       st,spi-midi-ns:
         description: |
-          Only for STM32H7, (Master Inter-Data Idleness) minimum time
+          Only available since STM32H7, (Master Inter-Data Idleness) minimum time
           delay in nanoseconds inserted between two consecutive data frames.
 
 required:

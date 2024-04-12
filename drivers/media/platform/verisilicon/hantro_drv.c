@@ -161,7 +161,6 @@ void hantro_end_prepare_run(struct hantro_ctx *ctx)
 	src_buf = hantro_get_src_buf(ctx);
 	v4l2_ctrl_request_complete(src_buf->vb2_buf.req_obj.req,
 				   &ctx->ctrl_handler);
-
 	/* Kick the watchdog. */
 	schedule_delayed_work(&ctx->dev->watchdog_work,
 			      msecs_to_jiffies(2000));
@@ -185,6 +184,8 @@ static void device_run(void *priv)
 		goto err_cancel_job;
 
 	v4l2_m2m_buf_copy_metadata(src, dst, true);
+
+	ctx->codec_ops->reset(ctx);
 
 	if (ctx->codec_ops->run(ctx))
 		goto err_cancel_job;
@@ -284,6 +285,38 @@ static int hantro_try_ctrl(struct v4l2_ctrl *ctrl)
 		if (dec_params->profile != 0)
 			return -EINVAL;
 	}
+
+	return 0;
+}
+
+static int hantro_enc_try_ctrl(struct v4l2_ctrl *ctrl)
+{
+	if (ctrl->id == V4L2_CID_ROTATE) {
+		/* Only 90 and 270 degrees rotation are supported */
+		if (ctrl->val != 0 && ctrl->val != 90 && ctrl->val != 270)
+			return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int hantro_enc_s_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct hantro_ctx *ctx;
+
+	ctx = container_of(ctrl->handler,
+			   struct hantro_ctx, ctrl_handler);
+
+	vpu_debug(1, "s_ctrl: id = %d, val = %d\n", ctrl->id, ctrl->val);
+
+	switch (ctrl->id) {
+	case V4L2_CID_ROTATE:
+		ctx->rotation = ctrl->val;
+		break;
+	default:
+		return -EINVAL;
+	}
+
 	return 0;
 }
 
@@ -337,6 +370,11 @@ static const struct v4l2_ctrl_ops hantro_vp9_ctrl_ops = {
 	.s_ctrl = hantro_vp9_s_ctrl,
 };
 
+static const struct v4l2_ctrl_ops hantro_enc_ctrl_ops = {
+	.try_ctrl = hantro_enc_try_ctrl,
+	.s_ctrl = hantro_enc_s_ctrl,
+};
+
 #define HANTRO_JPEG_ACTIVE_MARKERS	(V4L2_JPEG_ACTIVE_MARKER_APP0 | \
 					 V4L2_JPEG_ACTIVE_MARKER_COM | \
 					 V4L2_JPEG_ACTIVE_MARKER_DQT | \
@@ -373,6 +411,20 @@ static const struct hantro_ctrl controls[] = {
 		.codec = HANTRO_MPEG2_DECODER,
 		.cfg = {
 			.id = V4L2_CID_STATELESS_MPEG2_SEQUENCE,
+		},
+	}, {
+		.codec = HANTRO_VP8_ENCODER,
+		.cfg = {
+			.id = V4L2_CID_STATELESS_VP8_ENCODE_PARAMS,
+		},
+	}, {
+		.codec = HANTRO_VP8_ENCODER,
+		.cfg = {
+			.id = V4L2_CID_STATELESS_VP8_ENCODE_QP,
+			.min = 0,
+			.max = 127,
+			.step = 1,
+			.def = 0,
 		},
 	}, {
 		.codec = HANTRO_MPEG2_DECODER,
@@ -499,6 +551,16 @@ static const struct hantro_ctrl controls[] = {
 		.cfg = {
 			.id = V4L2_CID_STATELESS_VP9_COMPRESSED_HDR,
 		},
+	}, {
+		.codec = HANTRO_H264_ENCODER,
+		.cfg = {
+			.id = V4L2_CID_STATELESS_H264_ENCODE_PARAMS,
+		},
+	}, {
+		.codec = HANTRO_H264_ENCODER,
+		.cfg = {
+			.id = V4L2_CID_STATELESS_H264_ENCODE_RC,
+		},
 	},
 };
 
@@ -508,7 +570,11 @@ static int hantro_ctrls_setup(struct hantro_dev *vpu,
 {
 	int i, num_ctrls = ARRAY_SIZE(controls);
 
-	v4l2_ctrl_handler_init(&ctx->ctrl_handler, num_ctrls);
+	v4l2_ctrl_handler_init(&ctx->ctrl_handler, 1 + num_ctrls);
+
+	if (ctx->is_encoder)
+		v4l2_ctrl_new_std(&ctx->ctrl_handler, &hantro_enc_ctrl_ops,
+				  V4L2_CID_ROTATE, 0, 270, 90, 0);
 
 	for (i = 0; i < num_ctrls; i++) {
 		if (!(allowed_codecs & controls[i].codec))
@@ -523,6 +589,7 @@ static int hantro_ctrls_setup(struct hantro_dev *vpu,
 			v4l2_ctrl_handler_free(&ctx->ctrl_handler);
 			return ctx->ctrl_handler.error;
 		}
+
 	}
 	return v4l2_ctrl_handler_setup(&ctx->ctrl_handler);
 }
@@ -642,6 +709,10 @@ static const struct of_device_id of_hantro_match[] = {
 #endif
 #ifdef CONFIG_VIDEO_HANTRO_SUNXI
 	{ .compatible = "allwinner,sun50i-h6-vpu-g2", .data = &sunxi_vpu_variant, },
+#endif
+#ifdef CONFIG_VIDEO_HANTRO_STM32MP25
+	{ .compatible = "st,stm32mp25-vdec", .data = &stm32mp25_vdec_variant, },
+	{ .compatible = "st,stm32mp25-venc", .data = &stm32mp25_venc_variant, },
 #endif
 	{ /* sentinel */ }
 };
@@ -899,13 +970,15 @@ static int hantro_probe(struct platform_device *pdev)
 	const struct of_device_id *match;
 	struct hantro_dev *vpu;
 	struct resource *res;
+	struct device_node *np;
 	int num_bases;
-	int i, ret;
+	int i, ret, mbl;
 
 	vpu = devm_kzalloc(&pdev->dev, sizeof(*vpu), GFP_KERNEL);
 	if (!vpu)
 		return -ENOMEM;
 
+	np = pdev->dev.of_node;
 	vpu->dev = &pdev->dev;
 	vpu->pdev = pdev;
 	mutex_init(&vpu->vpu_mutex);
@@ -981,6 +1054,14 @@ static int hantro_probe(struct platform_device *pdev)
 		return ret;
 	}
 	vb2_dma_contig_set_max_seg_size(&pdev->dev, DMA_BIT_MASK(32));
+
+	/* get max burst length */
+	ret = of_property_read_u32(np, "maxburstlen", &mbl);
+	if (ret)
+		/* Set to max value if not DT properties */
+		mbl = 64;
+
+	vpu->max_burst_length = mbl / 8;
 
 	for (i = 0; i < vpu->variant->num_irqs; i++) {
 		const char *irq_name;

@@ -912,12 +912,24 @@ config SPI_SPRD_ADI
 config SPI_STM32
 	tristate "STMicroelectronics STM32 SPI controller"
 	depends on ARCH_STM32 || COMPILE_TEST
+	select SPI_SLAVE
 	help
 	  SPI driver for STMicroelectronics STM32 SoCs.
 
 	  STM32 SPI controller supports DMA and PIO modes. When DMA
 	  is not available, the driver automatically falls back to
 	  PIO mode.
+
+config SPI_STM32_OSPI
+	tristate "STMicroelectronics STM32 OCTO SPI controller"
+	depends on ARCH_STM32 || COMPILE_TEST
+	depends on OF
+	depends on SPI_MEM
+	depends on STM32_OMI
+	help
+	  This enables support for the Octo SPI controller in master mode.
+	  This driver does not support generic SPI. The implementation only
+	  supports spi-mem interface.
 
 config SPI_STM32_QSPI
 	tristate "STMicroelectronics STM32 QUAD SPI controller"

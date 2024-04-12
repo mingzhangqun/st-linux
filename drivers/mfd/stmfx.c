@@ -81,13 +81,11 @@ static struct mfd_cell stmfx_cells[] = {
 		.num_resources = ARRAY_SIZE(stmfx_pinctrl_resources),
 	},
 	{
-		.of_compatible = "st,stmfx-0300-idd",
 		.name = "stmfx-idd",
 		.resources = stmfx_idd_resources,
 		.num_resources = ARRAY_SIZE(stmfx_idd_resources),
 	},
 	{
-		.of_compatible = "st,stmfx-0300-ts",
 		.name = "stmfx-ts",
 		.resources = stmfx_ts_resources,
 		.num_resources = ARRAY_SIZE(stmfx_ts_resources),
@@ -193,12 +191,28 @@ static void stmfx_irq_unmask(struct irq_data *data)
 	stmfx->irq_src |= BIT(data->hwirq % 8);
 }
 
+static int stmfx_irq_set_affinity(struct irq_data *d, const struct cpumask *dest, bool force)
+{
+	struct stmfx *stmfx = irq_data_get_irq_chip_data(d);
+	struct i2c_client *client = to_i2c_client(stmfx->dev);
+	static DEFINE_RATELIMIT_STATE(rs, DEFAULT_RATELIMIT_INTERVAL * 10, 1);
+
+	if (__ratelimit(&rs))
+		dev_notice(stmfx->dev,
+			   "Can't set the affinity, set it for irq %d instead\n", client->irq);
+	if (force)
+		return -EINVAL;
+
+	return 0;
+}
+
 static struct irq_chip stmfx_irq_chip = {
 	.name			= "stmfx-core",
 	.irq_bus_lock		= stmfx_irq_bus_lock,
 	.irq_bus_sync_unlock	= stmfx_irq_bus_sync_unlock,
 	.irq_mask		= stmfx_irq_mask,
 	.irq_unmask		= stmfx_irq_unmask,
+	.irq_set_affinity	= IS_ENABLED(CONFIG_SMP) ? stmfx_irq_set_affinity : NULL,
 };
 
 static irqreturn_t stmfx_irq_handler(int irq, void *data)
@@ -306,6 +320,21 @@ irq_exit:
 	return ret;
 }
 
+static int stmfx_chip_wait_boot(struct stmfx *stmfx)
+{
+	unsigned long timeout_ms = 0;
+	unsigned int val;
+	int ret;
+
+	while (1) {
+		ret = regmap_read(stmfx->map, STMFX_REG_FW_VERSION_MSB, &val);
+		if (ret != -ENXIO || timeout_ms > STMFX_BOOT_TIME_MS)
+			return ret;
+		mdelay(1);
+		timeout_ms++;
+	}
+}
+
 static int stmfx_chip_reset(struct stmfx *stmfx)
 {
 	int ret;
@@ -341,6 +370,11 @@ static int stmfx_chip_init(struct i2c_client *client)
 			dev_err(&client->dev, "VDD enable failed: %d\n", ret);
 			return ret;
 		}
+	}
+	ret = stmfx_chip_wait_boot(stmfx);
+	if (ret) {
+		dev_err(stmfx->dev, "Boot chip failed: %d\n", ret);
+		return ret;
 	}
 
 	ret = regmap_read(stmfx->map, STMFX_REG_CHIP_ID, &id);
@@ -450,6 +484,10 @@ static int stmfx_probe(struct i2c_client *client,
 	if (ret)
 		goto err_chip_exit;
 
+	/* Parent I2C controller could use DMA, STMFX and child devices do not */
+	dev->coherent_dma_mask = 0;
+	dev->dma_mask = &dev->coherent_dma_mask;
+
 	ret = devm_mfd_add_devices(dev, PLATFORM_DEVID_NONE,
 				   stmfx_cells, ARRAY_SIZE(stmfx_cells), NULL,
 				   0, stmfx->irq_domain);
@@ -510,6 +548,11 @@ static int stmfx_resume(struct device *dev)
 				"VDD enable failed: %d\n", ret);
 			return ret;
 		}
+	}
+	ret = stmfx_chip_wait_boot(stmfx);
+	if (ret) {
+		dev_err(stmfx->dev, "Boot chip failed: %d\n", ret);
+		return ret;
 	}
 
 	/* Reset STMFX - supply has been stopped during suspend */

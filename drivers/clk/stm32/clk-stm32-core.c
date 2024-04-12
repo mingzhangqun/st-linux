@@ -19,6 +19,9 @@
 
 static DEFINE_SPINLOCK(rlock);
 
+static void stm32_clk_summary_debugfs_create(struct device *dev,
+					     const struct stm32_rcc_match_data *data);
+
 static int stm32_rcc_clock_init(struct device *dev,
 				const struct of_device_id *match,
 				void __iomem *base)
@@ -28,12 +31,15 @@ static int stm32_rcc_clock_init(struct device *dev,
 	struct device_node *np = dev_of_node(dev);
 	struct clk_hw **hws;
 	int n, max_binding;
+	int ret;
 
 	max_binding =  data->maxbinding;
 
 	clk_data = devm_kzalloc(dev, struct_size(clk_data, hws, max_binding), GFP_KERNEL);
 	if (!clk_data)
 		return -ENOMEM;
+
+	data->clock_data->base = base;
 
 	clk_data->num = max_binding;
 
@@ -64,7 +70,14 @@ static int stm32_rcc_clock_init(struct device *dev,
 			hws[cfg_clock->id] = hw;
 	}
 
-	return of_clk_add_hw_provider(np, of_clk_hw_onecell_get, clk_data);
+	ret = of_clk_add_hw_provider(np, of_clk_hw_onecell_get, clk_data);
+	if (ret)
+		return ret;
+
+	if (data->clock_summary)
+		stm32_clk_summary_debugfs_create(dev, data);
+
+	return ret;
 }
 
 int stm32_rcc_init(struct device *dev, const struct of_device_id *match_data,
@@ -96,9 +109,9 @@ int stm32_rcc_init(struct device *dev, const struct of_device_id *match_data,
 	return 0;
 }
 
-static u8 stm32_mux_get_parent(void __iomem *base,
-			       struct clk_stm32_clock_data *data,
-			       u16 mux_id)
+u8 stm32_mux_get_parent(void __iomem *base,
+			struct clk_stm32_clock_data *data,
+			u16 mux_id)
 {
 	const struct stm32_mux_cfg *mux = &data->muxes[mux_id];
 	u32 mask = BIT(mux->width) - 1;
@@ -127,6 +140,29 @@ static int stm32_mux_set_parent(void __iomem *base,
 
 	return 0;
 }
+
+#ifdef CONFIG_PM_SLEEP
+static void stm32_gate_force_endisable(void __iomem *base,
+				       struct clk_stm32_clock_data *data,
+				       u16 gate_id,
+				       int enable)
+{
+	const struct stm32_gate_cfg *gate = &data->gates[gate_id];
+	void __iomem *addr = base + gate->offset;
+
+	if (enable) {
+		if (gate->set_clr != 0)
+			writel(BIT(gate->bit_idx), addr);
+		else
+			writel(readl(addr) | BIT(gate->bit_idx), addr);
+	} else {
+		if (gate->set_clr != 0)
+			writel(BIT(gate->bit_idx), addr + gate->set_clr);
+		else
+			writel(readl(addr) & ~BIT(gate->bit_idx), addr);
+	}
+}
+#endif
 
 static void stm32_gate_endisable(void __iomem *base,
 				 struct clk_stm32_clock_data *data,
@@ -202,10 +238,10 @@ static unsigned int _get_div(const struct clk_div_table *table,
 	return val + 1;
 }
 
-static unsigned long stm32_divider_get_rate(void __iomem *base,
-					    struct clk_stm32_clock_data *data,
-					    u16 div_id,
-					    unsigned long parent_rate)
+unsigned long stm32_divider_get_rate(void __iomem *base,
+				     struct clk_stm32_clock_data *data,
+				     u16 div_id,
+				     unsigned long parent_rate)
 {
 	const struct stm32_div_cfg *divider = &data->dividers[div_id];
 	unsigned int val;
@@ -322,11 +358,28 @@ static void clk_stm32_gate_disable_unused(struct clk_hw *hw)
 	spin_unlock_irqrestore(gate->lock, flags);
 }
 
+#ifdef CONFIG_PM_SLEEP
+static void clk_stm32_pm_gate_restore(struct clk_hw *hw)
+{
+	struct clk_stm32_gate *gate = to_clk_stm32_gate(hw);
+	unsigned long flags = 0;
+
+	if (__clk_get_enable_count(hw->clk)) {
+		spin_lock_irqsave(gate->lock, flags);
+		stm32_gate_force_endisable(gate->base, gate->clock_data, gate->gate_id, 1);
+		spin_unlock_irqrestore(gate->lock, flags);
+	}
+}
+#endif
+
 const struct clk_ops clk_stm32_gate_ops = {
 	.enable		= clk_stm32_gate_enable,
 	.disable	= clk_stm32_gate_disable,
 	.is_enabled	= clk_stm32_gate_is_enabled,
 	.disable_unused	= clk_stm32_gate_disable_unused,
+#ifdef CONFIG_PM_SLEEP
+	.restore_context = clk_stm32_pm_gate_restore,
+#endif
 };
 
 static int clk_stm32_divider_set_rate(struct clk_hw *hw, unsigned long rate,
@@ -598,6 +651,21 @@ static void clk_stm32_composite_disable_unused(struct clk_hw *hw)
 	spin_unlock_irqrestore(composite->lock, flags);
 }
 
+#ifdef CONFIG_PM_SLEEP
+static void clk_stm32_pm_composite_restore(struct clk_hw *hw)
+{
+	struct clk_stm32_composite *composite = to_clk_stm32_composite(hw);
+	unsigned long flags = 0;
+
+	if (__clk_get_enable_count(hw->clk)) {
+		spin_lock_irqsave(composite->lock, flags);
+		stm32_gate_force_endisable(composite->base, composite->clock_data,
+					   composite->gate_id, 1);
+		spin_unlock_irqrestore(composite->lock, flags);
+	}
+}
+#endif
+
 const struct clk_ops clk_stm32_composite_ops = {
 	.set_rate	= clk_stm32_composite_set_rate,
 	.recalc_rate	= clk_stm32_composite_recalc_rate,
@@ -608,6 +676,9 @@ const struct clk_ops clk_stm32_composite_ops = {
 	.disable	= clk_stm32_composite_gate_disable,
 	.is_enabled	= clk_stm32_composite_is_enabled,
 	.disable_unused	= clk_stm32_composite_disable_unused,
+#ifdef CONFIG_PM_SLEEP
+	.restore_context = clk_stm32_pm_composite_restore,
+#endif
 };
 
 struct clk_hw *clk_stm32_mux_register(struct device *dev,
@@ -693,3 +764,133 @@ struct clk_hw *clk_stm32_composite_register(struct device *dev,
 
 	return hw;
 }
+
+#ifdef CONFIG_DEBUG_FS
+
+#include <linux/debugfs.h>
+
+static void rcc_summary_show_one(struct seq_file *s, struct clk_summary *c,
+				 int level)
+{
+	char enabled;
+
+	seq_printf(s, "%*s%-*s %11lu ",
+		   level * 3 + 1, "",
+		   30 - level * 3,
+		   c->name,
+		   c->rate
+		);
+
+	switch (c->enabled) {
+	case 0:
+		enabled = 'N';
+		break;
+	case 1:
+		enabled = 'Y';
+		break;
+	default:
+		enabled = '?';
+		break;
+	}
+
+	seq_printf(s, " %9c\n", enabled);
+}
+
+static int clock_summary_clk_is_enabled(struct clk_stm32_clock_data *data,
+					struct clk_summary *c)
+{
+	return stm32_gate_is_enabled(data->base, data, c->gate_id);
+}
+
+static const char *clock_summary_get_parent_name(struct clk_stm32_clock_data *data,
+						 struct clk_summary *c)
+{
+	int id = 0;
+
+	if (c->nb_parents == 0)
+		return NULL;
+
+	if (c->nb_parents > 1) {
+		if (c->get_parent)
+			id = c->get_parent(data, c);
+		else
+			id = stm32_mux_get_parent(data->base, data, c->mux_id);
+	}
+
+	return c->parent_names[id];
+}
+
+static void rcc_summary_show_subtree(struct seq_file *s, struct clk_summary *c,
+				     unsigned long parent_rate, int level)
+{
+	struct stm32_rcc_match_data *match_data = (struct stm32_rcc_match_data *)s->private;
+	struct clk_stm32_clock_data *data = match_data->clock_data;
+	struct clock_summary *cs = match_data->clock_summary;
+	int i;
+
+	if (c->get_rate)
+		c->rate = c->get_rate(data, c, parent_rate);
+	else
+		c->rate = parent_rate;
+
+	c->enabled = -1;
+
+	if (c->is_enabled)
+		c->enabled = c->is_enabled(data, c);
+
+	else if (c->gate_id != NO_STM32_GATE)
+		c->enabled = clock_summary_clk_is_enabled(data, c);
+
+	rcc_summary_show_one(s, c, level);
+
+	for (i = 0; i < cs->nb_clocks; i++) {
+		struct clk_summary *child = &cs->clocks[i];
+		const char *parent_name = clock_summary_get_parent_name(data, child);
+
+		if (!parent_name)
+			continue;
+
+		if (!strcmp(c->name, parent_name))
+			rcc_summary_show_subtree(s, child, c->rate, level + 1);
+	}
+}
+
+static int rcc_summary_show(struct seq_file *s, void *data)
+{
+	struct stm32_rcc_match_data *match_data = (struct stm32_rcc_match_data *)s->private;
+	struct clock_summary *cs = match_data->clock_summary;
+
+	int i;
+
+	seq_puts(s, "                                              hardware\n");
+	seq_puts(s, "   clock                               rate     enable\n");
+	seq_puts(s, "------------------------------------------------------\n");
+
+	for (i = 0; i < cs->nb_clocks; i++) {
+		struct clk_summary *c = &cs->clocks[i];
+
+		if (c->nb_parents == 0)
+			rcc_summary_show_subtree(s, c, 0, 0);
+	}
+
+	return 0;
+}
+
+DEFINE_SHOW_ATTRIBUTE(rcc_summary);
+
+static void stm32_clk_summary_debugfs_create(struct device *dev,
+					     const struct stm32_rcc_match_data *data)
+{
+	struct dentry *rootdir = debugfs_lookup("clk", NULL);
+
+	debugfs_create_file("stm32_clk_summary", 0444, rootdir, (void *)data, &rcc_summary_fops);
+}
+
+#else
+
+static void stm32_clk_summary_debugfs_create(struct device *dev,
+					     const struct stm32_rcc_match_data *data)
+
+{
+}
+#endif

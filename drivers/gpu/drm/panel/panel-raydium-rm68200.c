@@ -10,6 +10,8 @@
 #include <linux/gpio/consumer.h>
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
+#include <linux/pm_runtime.h>
+#include <linux/of.h>
 #include <linux/regulator/consumer.h>
 
 #include <video/mipi_display.h>
@@ -91,9 +93,24 @@ static const struct drm_display_mode default_mode = {
 	.vsync_start = 1280 + 12,
 	.vsync_end = 1280 + 12 + 5,
 	.vtotal = 1280 + 12 + 5 + 12,
-	.flags = 0,
+	.flags = DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC,
 	.width_mm = 68,
 	.height_mm = 122,
+};
+
+static const struct drm_display_mode rotate_mode = {
+	.clock = 54000,
+	.hdisplay = 1280,
+	.hsync_start = 1280 + 12,
+	.hsync_end = 1280 + 12 + 5,
+	.htotal = 1280 + 12 + 5 + 12,
+	.vdisplay = 720,
+	.vsync_start = 720 + 48,
+	.vsync_end = 720 + 48 + 9,
+	.vtotal = 720 + 48 + 9 + 48,
+	.flags = DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC,
+	.width_mm = 122,
+	.height_mm = 68,
 };
 
 static inline struct rm68200 *panel_to_rm68200(struct drm_panel *panel)
@@ -260,14 +277,11 @@ static int rm68200_unprepare(struct drm_panel *panel)
 	if (ret)
 		dev_warn(panel->dev, "failed to enter sleep mode: %d\n", ret);
 
-	msleep(120);
-
-	if (ctx->reset_gpio) {
-		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
-		msleep(20);
-	}
-
-	regulator_disable(ctx->supply);
+	pm_runtime_set_autosuspend_delay(ctx->dev, 1000);
+	pm_runtime_mark_last_busy(panel->dev);
+	ret = pm_runtime_put_autosuspend(panel->dev);
+	if (ret < 0)
+		return ret;
 
 	ctx->prepared = false;
 
@@ -283,17 +297,10 @@ static int rm68200_prepare(struct drm_panel *panel)
 	if (ctx->prepared)
 		return 0;
 
-	ret = regulator_enable(ctx->supply);
+	ret = pm_runtime_get_sync(panel->dev);
 	if (ret < 0) {
-		dev_err(ctx->dev, "failed to enable supply: %d\n", ret);
+		pm_runtime_put_autosuspend(panel->dev);
 		return ret;
-	}
-
-	if (ctx->reset_gpio) {
-		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
-		msleep(20);
-		gpiod_set_value_cansleep(ctx->reset_gpio, 0);
-		msleep(100);
 	}
 
 	rm68200_init_sequence(ctx);
@@ -331,13 +338,33 @@ static int rm68200_get_modes(struct drm_panel *panel,
 			     struct drm_connector *connector)
 {
 	struct drm_display_mode *mode;
+	struct rm68200 *ctx = panel_to_rm68200(panel);
+	struct device *dev = ctx->dev;
+	int rotation, ret;
 
-	mode = drm_mode_duplicate(connector->dev, &default_mode);
-	if (!mode) {
-		dev_err(panel->dev, "failed to add mode %ux%u@%u\n",
-			default_mode.hdisplay, default_mode.vdisplay,
-			drm_mode_vrefresh(&default_mode));
-		return -ENOMEM;
+
+	ret = of_property_read_u32(dev->of_node, "rotation", &rotation);
+	if (ret == -EINVAL)
+		rotation = 0;
+
+	if (rotation == 90 || rotation == 270) {
+		mode = drm_mode_duplicate(connector->dev, &rotate_mode);
+
+		if (!mode) {
+			dev_err(panel->dev, "failed to add mode %ux%u@%u\n",
+				rotate_mode.hdisplay, rotate_mode.vdisplay,
+				drm_mode_vrefresh(&rotate_mode));
+			return -ENOMEM;
+		}
+	} else {
+		mode = drm_mode_duplicate(connector->dev, &default_mode);
+
+		if (!mode) {
+			dev_err(panel->dev, "failed to add mode %ux%u@%u\n",
+				default_mode.hdisplay, default_mode.vdisplay,
+				drm_mode_vrefresh(&default_mode));
+			return -ENOMEM;
+		}
 	}
 
 	drm_mode_set_name(mode);
@@ -347,6 +374,8 @@ static int rm68200_get_modes(struct drm_panel *panel,
 
 	connector->display_info.width_mm = mode->width_mm;
 	connector->display_info.height_mm = mode->height_mm;
+	connector->display_info.bus_flags = DRM_BUS_FLAG_DE_HIGH |
+					    DRM_BUS_FLAG_PIXDATA_DRIVE_POSEDGE;
 
 	return 1;
 }
@@ -372,7 +401,8 @@ static int rm68200_probe(struct mipi_dsi_device *dsi)
 	ctx->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
 	if (IS_ERR(ctx->reset_gpio)) {
 		ret = PTR_ERR(ctx->reset_gpio);
-		dev_err(dev, "cannot get reset GPIO: %d\n", ret);
+		if (ret != -EPROBE_DEFER)
+			dev_err(dev, "cannot get reset GPIO: %d\n", ret);
 		return ret;
 	}
 
@@ -393,8 +423,17 @@ static int rm68200_probe(struct mipi_dsi_device *dsi)
 	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST |
 			  MIPI_DSI_MODE_LPM | MIPI_DSI_CLOCK_NON_CONTINUOUS;
 
+	pm_runtime_enable(ctx->dev);
+	/* set delay to 60s to keep alive the panel to wait the splash screen */
+	pm_runtime_set_autosuspend_delay(ctx->dev, 60000);
+	pm_runtime_use_autosuspend(ctx->dev);
+
 	drm_panel_init(&ctx->panel, dev, &rm68200_drm_funcs,
 		       DRM_MODE_CONNECTOR_DSI);
+
+	pm_runtime_get_sync(ctx->dev);
+	pm_runtime_mark_last_busy(ctx->dev);
+	pm_runtime_put_autosuspend(ctx->dev);
 
 	ret = drm_panel_of_backlight(&ctx->panel);
 	if (ret)
@@ -418,7 +457,45 @@ static void rm68200_remove(struct mipi_dsi_device *dsi)
 
 	mipi_dsi_detach(dsi);
 	drm_panel_remove(&ctx->panel);
+
+	pm_runtime_dont_use_autosuspend(ctx->dev);
+	pm_runtime_disable(ctx->dev);
 }
+
+static __maybe_unused int raydium_rm68200_suspend(struct device *dev)
+{
+	struct rm68200 *ctx = dev_get_drvdata(dev);
+
+	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+	msleep(20);
+
+	regulator_disable(ctx->supply);
+
+	return 0;
+}
+
+static __maybe_unused int raydium_rm68200_resume(struct device *dev)
+{
+	struct rm68200 *ctx = dev_get_drvdata(dev);
+	int ret;
+
+	ret = regulator_enable(ctx->supply);
+	if (ret < 0) {
+		dev_err(ctx->dev, "failed to enable supply: %d\n", ret);
+		return ret;
+	}
+
+	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
+	msleep(100);
+
+	return 0;
+}
+
+static const struct dev_pm_ops raydium_rm68200_pm_ops = {
+	SET_RUNTIME_PM_OPS(raydium_rm68200_suspend, raydium_rm68200_resume, NULL)
+	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
+				pm_runtime_force_resume)
+};
 
 static const struct of_device_id raydium_rm68200_of_match[] = {
 	{ .compatible = "raydium,rm68200" },
@@ -432,6 +509,7 @@ static struct mipi_dsi_driver raydium_rm68200_driver = {
 	.driver = {
 		.name = "panel-raydium-rm68200",
 		.of_match_table = raydium_rm68200_of_match,
+		.pm = &raydium_rm68200_pm_ops,
 	},
 };
 module_mipi_dsi_driver(raydium_rm68200_driver);

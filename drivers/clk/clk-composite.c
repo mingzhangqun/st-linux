@@ -42,6 +42,18 @@ static unsigned long clk_composite_recalc_rate(struct clk_hw *hw,
 	return rate_ops->recalc_rate(rate_hw, parent_rate);
 }
 
+static int clk_composite_get_duty_cycle(struct clk_hw *hw,
+					struct clk_duty *duty)
+{
+	struct clk_composite *composite = to_clk_composite(hw);
+	const struct clk_ops *rate_ops = composite->rate_ops;
+	struct clk_hw *rate_hw = composite->rate_hw;
+
+	__clk_hw_set_clk(rate_hw, hw);
+
+	return rate_ops->get_duty_cycle(rate_hw, duty);
+}
+
 static int clk_composite_determine_rate_for_parent(struct clk_hw *rate_hw,
 						   struct clk_rate_request *req,
 						   struct clk_hw *parent_hw,
@@ -282,6 +294,9 @@ static struct clk_hw *__clk_hw_register_composite(struct device *dev,
 		}
 		clk_composite_ops->recalc_rate = clk_composite_recalc_rate;
 
+		if (rate_ops->get_duty_cycle)
+			clk_composite_ops->get_duty_cycle = clk_composite_get_duty_cycle;
+
 		if (rate_ops->determine_rate)
 			clk_composite_ops->determine_rate =
 				clk_composite_determine_rate;
@@ -487,3 +502,4 @@ struct clk_hw *devm_clk_hw_register_composite_pdata(struct device *dev,
 						rate_hw, rate_ops, gate_hw,
 						gate_ops, flags);
 }
+EXPORT_SYMBOL_GPL(devm_clk_hw_register_composite_pdata);

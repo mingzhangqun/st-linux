@@ -342,6 +342,11 @@ static int rtl8211f_config_init(struct phy_device *phydev)
 	u16 val_txdly, val_rxdly;
 	int ret;
 
+	/* Set green LED for Link, yellow LED for Active */
+	phy_write(phydev, RTL821x_PAGE_SELECT, 0xd04);
+	phy_write(phydev, 0x10, 0x617f);
+	phy_write(phydev, RTL821x_PAGE_SELECT, 0x0);
+
 	ret = phy_modify_paged_changed(phydev, 0xa43, RTL8211F_PHYCR1,
 				       RTL8211F_ALDPS_PLL_OFF | RTL8211F_ALDPS_ENABLE | RTL8211F_ALDPS_XTAL_OFF,
 				       priv->phycr1);
@@ -404,6 +409,16 @@ static int rtl8211f_config_init(struct phy_device *phydev)
 		dev_dbg(dev,
 			"2ns RX delay was already %s (by pin-strapping RXD0 or bootloader configuration)\n",
 			val_rxdly ? "enabled" : "disabled");
+	}
+
+	if (of_property_read_bool(dev->of_node, "realtek,eee-disable")) {
+		rtl821x_write_page(phydev, 0xa4b);
+		phy_write(phydev, 0x11, 0x1110);
+		rtl821x_write_page(phydev, 0);
+		phy_write(phydev, 0xd,7);
+		phy_write(phydev, 0xe,0x3c);
+		phy_write(phydev, 0xd,0x4007);
+		phy_write(phydev, 0xe,0x0);
 	}
 
 	if (priv->has_phycr2) {

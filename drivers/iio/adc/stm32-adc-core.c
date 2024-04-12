@@ -18,10 +18,12 @@
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of_device.h>
+#include <linux/of_irq.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
+#include <linux/units.h>
 
 #include "stm32-adc-core.h"
 
@@ -46,6 +48,8 @@
  * @ovr_msk:    array of ovr (overrun flag) masks in csr for adc1..n
  * @ier:	interrupt enable register offset for each adc
  * @eocie_msk:	end of conversion interrupt enable mask in @ier
+ * @presc_msk:	prescaler mask in ccr
+ * @presc_shift: prescaler bit shift in ccr
  */
 struct stm32_adc_common_regs {
 	u32 csr;
@@ -54,6 +58,8 @@ struct stm32_adc_common_regs {
 	u32 ovr_msk[STM32_ADC_MAX_ADCS];
 	u32 ier;
 	u32 eocie_msk;
+	u32 presc_msk;
+	u32 presc_shift;
 };
 
 struct stm32_adc_priv;
@@ -62,6 +68,8 @@ struct stm32_adc_priv;
  * struct stm32_adc_priv_cfg - stm32 core compatible configuration data
  * @regs:	common registers for all instances
  * @clk_sel:	clock selection routine
+ * @presc:	clock prescaler array
+ * @num_presc:	number of clock prescalers in presc array
  * @max_clk_rate_hz: maximum analog clock rate (Hz, from datasheet)
  * @ipid:	adc identification number
  * @has_syscfg: SYSCFG capability flags
@@ -71,6 +79,8 @@ struct stm32_adc_priv;
 struct stm32_adc_priv_cfg {
 	const struct stm32_adc_common_regs *regs;
 	int (*clk_sel)(struct platform_device *, struct stm32_adc_priv *);
+	int *presc;
+	int num_presc;
 	u32 max_clk_rate_hz;
 	u32 ipid;
 	unsigned int has_syscfg;
@@ -80,8 +90,11 @@ struct stm32_adc_priv_cfg {
 
 /**
  * struct stm32_adc_priv - stm32 ADC core private data
+ * @dev:		pointer to adc device
  * @irq:		irq(s) for ADC block
+ * @irq_map:		mapping between children and parents irqs
  * @nb_adc_max:		actual maximum number of instance per ADC block
+ * @nb_irqs:		number of IRQs in the ADC block
  * @domain:		irq domain reference
  * @aclk:		clock reference for the analog circuitry
  * @bclk:		bus clock common for all ADCs, depends on part used
@@ -98,8 +111,11 @@ struct stm32_adc_priv_cfg {
  * @syscfg:		reference to syscon, system control registers
  */
 struct stm32_adc_priv {
+	struct device			*dev;
 	int				irq[STM32_ADC_MAX_ADCS];
+	int				irq_map[STM32_ADC_MAX_ADCS];
 	unsigned int			nb_adc_max;
+	unsigned int			nb_irqs;
 	struct irq_domain		*domain;
 	struct clk			*aclk;
 	struct clk			*bclk;
@@ -124,20 +140,23 @@ static struct stm32_adc_priv *to_stm32_adc_priv(struct stm32_adc_common *com)
 /* STM32F4 ADC internal common clock prescaler division ratios */
 static int stm32f4_pclk_div[] = {2, 4, 6, 8};
 
+/* STM32MP25 ADC internal common clock prescaler division ratios */
+static int stm32mp25_presc_div[] = {1, 2, 4, 6, 8, 10, 12, 16, 32, 64, 128, 256};
+
 /**
- * stm32f4_adc_clk_sel() - Select stm32f4 ADC common clock prescaler
+ * stm32_adc_clk_sel() - Select stm32f4 ADC common clock prescaler
  * @pdev: platform device
  * @priv: stm32 ADC core private data
  * Select clock prescaler used for analog conversions, before using ADC.
  */
-static int stm32f4_adc_clk_sel(struct platform_device *pdev,
-			       struct stm32_adc_priv *priv)
+static int stm32_adc_clk_sel(struct platform_device *pdev,
+			     struct stm32_adc_priv *priv)
 {
 	unsigned long rate;
 	u32 val;
 	int i;
 
-	/* stm32f4 has one clk input for analog (mandatory), enforce it here */
+	/* stm32f4/mp25 has one clk input for analog (mandatory), enforce it here */
 	if (!priv->aclk) {
 		dev_err(&pdev->dev, "No 'adc' clock found\n");
 		return -ENOENT;
@@ -149,20 +168,20 @@ static int stm32f4_adc_clk_sel(struct platform_device *pdev,
 		return -EINVAL;
 	}
 
-	for (i = 0; i < ARRAY_SIZE(stm32f4_pclk_div); i++) {
-		if ((rate / stm32f4_pclk_div[i]) <= priv->max_clk_rate)
+	for (i = 0; i < priv->cfg->num_presc; i++) {
+		if ((rate / priv->cfg->presc[i]) <= priv->max_clk_rate)
 			break;
 	}
-	if (i >= ARRAY_SIZE(stm32f4_pclk_div)) {
+	if (i >= priv->cfg->num_presc) {
 		dev_err(&pdev->dev, "adc clk selection failed\n");
 		return -EINVAL;
 	}
 
-	priv->common.rate = rate / stm32f4_pclk_div[i];
-	val = readl_relaxed(priv->common.base + STM32F4_ADC_CCR);
-	val &= ~STM32F4_ADC_ADCPRE_MASK;
-	val |= i << STM32F4_ADC_ADCPRE_SHIFT;
-	writel_relaxed(val, priv->common.base + STM32F4_ADC_CCR);
+	priv->common.rate = rate / priv->cfg->presc[i];
+	val = readl_relaxed(priv->common.base + priv->cfg->regs->ccr);
+	val &= ~priv->cfg->regs->presc_msk;
+	val |= i << priv->cfg->regs->presc_shift;
+	writel_relaxed(val, priv->common.base + priv->cfg->regs->ccr);
 
 	dev_dbg(&pdev->dev, "Using analog clock source at %ld kHz\n",
 		priv->common.rate / 1000);
@@ -306,20 +325,44 @@ out:
 static const struct stm32_adc_common_regs stm32f4_adc_common_regs = {
 	.csr = STM32F4_ADC_CSR,
 	.ccr = STM32F4_ADC_CCR,
-	.eoc_msk = { STM32F4_EOC1, STM32F4_EOC2, STM32F4_EOC3},
-	.ovr_msk = { STM32F4_OVR1, STM32F4_OVR2, STM32F4_OVR3},
+	.eoc_msk = { STM32F4_EOC1, STM32F4_EOC2, STM32F4_EOC3 },
+	.ovr_msk = { STM32F4_OVR1, STM32F4_OVR2, STM32F4_OVR3 },
 	.ier = STM32F4_ADC_CR1,
 	.eocie_msk = STM32F4_EOCIE,
+	.presc_msk = STM32F4_ADC_ADCPRE_MASK,
+	.presc_shift = STM32F4_ADC_ADCPRE_SHIFT,
 };
 
 /* STM32H7 common registers definitions */
 static const struct stm32_adc_common_regs stm32h7_adc_common_regs = {
 	.csr = STM32H7_ADC_CSR,
 	.ccr = STM32H7_ADC_CCR,
+	.eoc_msk = { STM32H7_EOC_MST, STM32H7_EOC_SLV },
+	.ovr_msk = { STM32H7_OVR_MST, STM32H7_OVR_SLV },
+	.ier = STM32H7_ADC_IER,
+	.eocie_msk = STM32H7_EOCIE,
+};
+
+/* STM32MP13 common registers definitions */
+static const struct stm32_adc_common_regs stm32mp13_adc_common_regs = {
+	.csr = STM32H7_ADC_CSR,
+	.ccr = STM32H7_ADC_CCR,
+	.eoc_msk = { STM32H7_EOC_MST },
+	.ovr_msk = { STM32H7_OVR_MST },
+	.ier = STM32H7_ADC_IER,
+	.eocie_msk = STM32H7_EOCIE,
+};
+
+/* STM32MP25 common registers definitions */
+static const struct stm32_adc_common_regs stm32mp25_adc_common_regs = {
+	.csr = STM32H7_ADC_CSR,
+	.ccr = STM32H7_ADC_CCR,
 	.eoc_msk = { STM32H7_EOC_MST, STM32H7_EOC_SLV},
 	.ovr_msk = { STM32H7_OVR_MST, STM32H7_OVR_SLV},
 	.ier = STM32H7_ADC_IER,
 	.eocie_msk = STM32H7_EOCIE,
+	.presc_msk = STM32H7_PRESC_MASK,
+	.presc_shift = STM32H7_PRESC_SHIFT,
 };
 
 static const unsigned int stm32_adc_offset[STM32_ADC_MAX_ADCS] = {
@@ -369,24 +412,84 @@ static void stm32_adc_irq_handler(struct irq_desc *desc)
 	chained_irq_exit(chip, desc);
 };
 
-static int stm32_adc_domain_map(struct irq_domain *d, unsigned int irq,
-				irq_hw_number_t hwirq)
+static void stm32_adc_core_mask(struct irq_data *d)
 {
-	irq_set_chip_data(irq, d->host_data);
-	irq_set_chip_and_handler(irq, &dummy_irq_chip, handle_level_irq);
-
-	return 0;
+	if (d->parent_data->chip)
+		irq_chip_mask_parent(d);
 }
 
-static void stm32_adc_domain_unmap(struct irq_domain *d, unsigned int irq)
+static void stm32_adc_core_unmask(struct irq_data *d)
 {
-	irq_set_chip_and_handler(irq, NULL, NULL);
-	irq_set_chip_data(irq, NULL);
+	if (d->parent_data->chip)
+		irq_chip_unmask_parent(d);
+}
+
+struct irq_chip stm32_irq_chip = {
+	.name		= "stm32_adc_core",
+	.irq_mask	= stm32_adc_core_mask,
+	.irq_unmask	= stm32_adc_core_unmask,
+	.flags		= IRQCHIP_SKIP_SET_WAKE,
+};
+
+static int stm32_adc_core_domain_alloc(struct irq_domain *dm, unsigned int virq,
+				       unsigned int nr_irqs, void *data)
+{
+	irq_hw_number_t hwirq;
+	struct stm32_adc_priv *priv = dm->host_data;
+	struct irq_fwspec *fwspec = data;
+	struct irq_data *irq_data, *irq_data_p;
+	u32 irq_parent;
+	int ret, virq_p;
+
+	if (!dm->parent) {
+		dev_err(priv->dev, "parent domain missing\n");
+		return -EINVAL;
+	}
+
+	hwirq = fwspec->param[0];
+	dev_dbg(priv->dev, "adc child hw irq %lu virt irq %u\n", hwirq, virq);
+
+	ret = irq_domain_set_hwirq_and_chip(dm, virq, hwirq, &stm32_irq_chip, NULL);
+	if (ret < 0)
+		return ret;
+
+	irq_set_chip_data(virq, dm->host_data);
+	irq_set_chip_and_handler(virq, &stm32_irq_chip, handle_level_irq);
+
+	irq_parent = priv->irq_map[hwirq];
+
+	virq_p = irq_find_mapping(dm->parent, irq_parent);
+	dev_dbg(priv->dev, "adc core hw irq %d, virt irq %d\n", irq_parent, virq_p);
+
+	irq_data = irq_get_irq_data(virq);
+	irq_data_p = irq_get_irq_data(virq_p);
+
+	if (!irq_data || !irq_data_p)
+		return -EINVAL;
+
+	irq_data->parent_data = irq_data_p;
+
+	return 0;
+};
+
+static void stm32_adc_core_domain_free(struct irq_domain *domain, unsigned int virq,
+				       unsigned int nr_irqs)
+{
+	struct irq_data *irq_data;
+
+	irq_set_chip_and_handler(virq, NULL, NULL);
+	irq_set_chip_data(virq, NULL);
+
+	irq_data = irq_get_irq_data(virq);
+	if (!irq_data)
+		return;
+
+	irq_data->parent_data = NULL;
 }
 
 static const struct irq_domain_ops stm32_adc_domain_ops = {
-	.map = stm32_adc_domain_map,
-	.unmap  = stm32_adc_domain_unmap,
+	.alloc	= stm32_adc_core_domain_alloc,
+	.free = stm32_adc_core_domain_free,
 	.xlate = irq_domain_xlate_onecell,
 };
 
@@ -394,28 +497,57 @@ static int stm32_adc_irq_probe(struct platform_device *pdev,
 			       struct stm32_adc_priv *priv)
 {
 	struct device_node *np = pdev->dev.of_node;
-	unsigned int i;
+	struct irq_domain *parent_domain;
+	struct irq_data *irqd;
+	int i;
 
 	/*
 	 * Interrupt(s) must be provided, depending on the compatible:
 	 * - stm32f4/h7 shares a common interrupt line.
 	 * - stm32mp1, has one line per ADC
+	 * - stm32mp25, has a dual ADC12 and standalone ADC3. Each ADC has an IRQ
+	 *   (two for ADC12, one for ADC3)
+	 *
+	 * Assume that children hw irqs are numbered from 0 to nb_adc_max-1
+	 * By default hw parent and children irqs are mapped by pair
+	 * If the ADC shares a common irq, all children irqs are mapped on the
+	 * same parent, yet.
 	 */
-	for (i = 0; i < priv->cfg->num_irqs; i++) {
+	for (i = 0; i < priv->nb_irqs; i++) {
 		priv->irq[i] = platform_get_irq(pdev, i);
 		if (priv->irq[i] < 0)
 			return priv->irq[i];
+		irqd = irq_get_irq_data(priv->irq[i]);
+		if (!irqd)
+			return -EINVAL;
+		priv->irq_map[i] = irqd->hwirq;
 	}
 
-	priv->domain = irq_domain_add_simple(np, STM32_ADC_MAX_ADCS, 0,
-					     &stm32_adc_domain_ops,
-					     priv);
+	if (priv->nb_irqs != priv->nb_adc_max) {
+		if (priv->cfg->num_irqs == 1) {
+			for (i = 1; i < priv->nb_adc_max; i++)
+				priv->irq_map[i] = priv->irq_map[0];
+		} else {
+			dev_err(&pdev->dev, "Could not map child irqs on parent irqs\n");
+			return -EINVAL;
+		}
+	}
+
+	parent_domain = irq_find_host(of_irq_find_parent(np));
+	if (!parent_domain) {
+		dev_err(&pdev->dev, "GIC interrupt-parent not found\n");
+		return -EINVAL;
+	}
+
+	priv->domain = irq_domain_add_hierarchy(parent_domain, 0, priv->nb_adc_max,
+						np, &stm32_adc_domain_ops, priv);
+
 	if (!priv->domain) {
 		dev_err(&pdev->dev, "Failed to add irq domain\n");
 		return -ENOMEM;
 	}
 
-	for (i = 0; i < priv->cfg->num_irqs; i++) {
+	for (i = 0; i < priv->nb_irqs; i++) {
 		irq_set_chained_handler(priv->irq[i], stm32_adc_irq_handler);
 		irq_set_handler_data(priv->irq[i], priv);
 	}
@@ -433,8 +565,10 @@ static void stm32_adc_irq_remove(struct platform_device *pdev,
 		irq_dispose_mapping(irq_find_mapping(priv->domain, hwirq));
 	irq_domain_remove(priv->domain);
 
-	for (i = 0; i < priv->cfg->num_irqs; i++)
+	for (i = 0; i < priv->nb_irqs; i++) {
 		irq_set_chained_handler(priv->irq[i], NULL);
+		irq_dispose_mapping(priv->irq[i]);
+	}
 }
 
 static int stm32_adc_core_switches_supply_en(struct stm32_adc_priv *priv,
@@ -682,6 +816,21 @@ static int stm32_adc_probe_identification(struct platform_device *pdev,
 		return -EINVAL;
 	}
 
+	if (priv->cfg->ipid == STM32MP25_IPIDR_NUMBER) {
+		/*
+		 * ADC diversity on STM32MP25 is handled here. There may be:
+		 * - 2 IRQs for ADC12 block
+		 * - 1 IRQ for ADC3 block.
+		 * There cannot be more IRQs than the actual number of ADCs.
+		 */
+		if (priv->nb_irqs > priv->nb_adc_max)
+			priv->nb_irqs = priv->nb_adc_max;
+
+		/* Identifies ADC3 trigger list, e.g. stm32mp25_adc3_trigs */
+		if (priv->nb_adc_max == 1)
+			priv->common.trig_id = 1;
+	}
+
 	val = readl_relaxed(priv->common.base + STM32MP1_ADC_VERR);
 	dev_dbg(&pdev->dev, "ADC version: %lu.%lu\n",
 		FIELD_GET(STM32MP1_MAJREV_MASK, val),
@@ -709,12 +858,14 @@ static int stm32_adc_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	platform_set_drvdata(pdev, &priv->common);
 
+	priv->dev = dev;
 	of_id = of_match_device(dev->driver->of_match_table, dev);
 	if (!of_id)
 		return -ENODEV;
 
 	priv->cfg = (const struct stm32_adc_priv_cfg *)of_id->data;
 	priv->nb_adc_max = priv->cfg->num_adcs;
+	priv->nb_irqs = priv->cfg->num_irqs;
 	spin_lock_init(&priv->common.lock);
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
@@ -849,7 +1000,9 @@ static DEFINE_RUNTIME_DEV_PM_OPS(stm32_adc_core_pm_ops,
 
 static const struct stm32_adc_priv_cfg stm32f4_adc_priv_cfg = {
 	.regs = &stm32f4_adc_common_regs,
-	.clk_sel = stm32f4_adc_clk_sel,
+	.clk_sel = stm32_adc_clk_sel,
+	.presc = stm32f4_pclk_div,
+	.num_presc = ARRAY_SIZE(stm32f4_pclk_div),
 	.max_clk_rate_hz = 36000000,
 	.num_irqs = 1,
 	.num_adcs = 3,
@@ -873,6 +1026,24 @@ static const struct stm32_adc_priv_cfg stm32mp1_adc_priv_cfg = {
 	.num_irqs = 2,
 };
 
+static const struct stm32_adc_priv_cfg stm32mp13_adc_priv_cfg = {
+	.regs = &stm32mp13_adc_common_regs,
+	.clk_sel = stm32h7_adc_clk_sel,
+	.max_clk_rate_hz = 75 * HZ_PER_MHZ,
+	.ipid = STM32MP13_IPIDR_NUMBER,
+	.num_irqs = 1,
+};
+
+static const struct stm32_adc_priv_cfg stm32mp25_adc_priv_cfg = {
+	.regs = &stm32mp25_adc_common_regs,
+	.clk_sel = stm32_adc_clk_sel,
+	.presc = stm32mp25_presc_div,
+	.num_presc = ARRAY_SIZE(stm32mp25_presc_div),
+	.max_clk_rate_hz = 70000000,
+	.ipid = STM32MP25_IPIDR_NUMBER,
+	.num_irqs = 2, /* 2 IRQs for ADC12, 1 irq for ADC3 */
+};
+
 static const struct of_device_id stm32_adc_of_match[] = {
 	{
 		.compatible = "st,stm32f4-adc-core",
@@ -883,6 +1054,12 @@ static const struct of_device_id stm32_adc_of_match[] = {
 	}, {
 		.compatible = "st,stm32mp1-adc-core",
 		.data = (void *)&stm32mp1_adc_priv_cfg
+	}, {
+		.compatible = "st,stm32mp13-adc-core",
+		.data = (void *)&stm32mp13_adc_priv_cfg
+	}, {
+		.compatible = "st,stm32mp25-adc-core",
+		.data = (void *)&stm32mp25_adc_priv_cfg
 	}, {
 	},
 };

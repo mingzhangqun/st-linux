@@ -228,13 +228,21 @@ config RENESAS_RPCIF
 
 config STM32_FMC2_EBI
 	tristate "Support for FMC2 External Bus Interface on STM32MP SoCs"
-	depends on MACH_STM32MP157 || COMPILE_TEST
+	depends on ARCH_STM32 || COMPILE_TEST
 	select MFD_SYSCON
 	help
 	  Select this option to enable the STM32 FMC2 External Bus Interface
 	  controller. This driver configures the transactions with external
 	  devices (like SRAM, ethernet adapters, FPGAs, LCD displays, ...) on
 	  SOCs containing the FMC2 External Bus Interface.
+
+config STM32_OMI
+	tristate "Support for OSPI Memory Interface on STM32MP SoCs"
+	depends on ARCH_STM32 || COMPILE_TEST
+	help
+	  Select this option to enable the STM32 OSPI Memory Interface controller
+	  (OMI) which provides either SPI or HyperBus support. This allows to support
+	  sNOR, sNAND or HyperFlash devices.
 
 source "drivers/memory/samsung/Kconfig"
 source "drivers/memory/tegra/Kconfig"
