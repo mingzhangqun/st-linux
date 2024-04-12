@@ -4,7 +4,7 @@
 $id: http://devicetree.org/schemas/media/st,stm32-dcmi.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: STMicroelectronics STM32 Digital Camera Memory Interface (DCMI) binding
+title: STMicroelectronics STM32 Digital Camera Memory Interface (DCMI)
 
 maintainers:
   - Hugues Fruchet <hugues.fruchet@foss.st.com>
@@ -27,14 +27,33 @@ properties:
       - const: mclk
 
   dmas:
-    maxItems: 1
+    minItems: 1
+    maxItems: 2
 
   dma-names:
     items:
       - const: tx
+      - const: mdma-tx
+    minItems: 1
 
   resets:
     maxItems: 1
+
+  power-domains:
+    maxItems: 1
+
+  sram:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      phandles to a reserved SRAM region which is used as temporary
+      storage memory between DMA and MDMA engines.
+      The region should be defined as child nodes of the AHB SRAM node
+      as per the generic bindings in Documentation/devicetree/bindings/sram/sram.yaml
+
+  feature-domains:
+    $ref: /schemas/types.yaml#/definitions/phandle-array
+    description: |
+      Phandle to the rifsc device to check access right.
 
   port:
     $ref: /schemas/graph.yaml#/$defs/port-base

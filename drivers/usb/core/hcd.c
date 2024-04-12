@@ -2293,7 +2293,8 @@ int hcd_bus_suspend(struct usb_device *rhdev, pm_message_t msg)
 
 		if (!PMSG_IS_AUTO(msg))
 			usb_phy_roothub_suspend(hcd->self.sysdev,
-						hcd->phy_roothub);
+						hcd->phy_roothub,
+						usb_wakeup_enabled_descendants(rhdev));
 
 		/* Did we race with a root-hub wakeup event? */
 		if (rhdev->do_remote_wakeup) {
@@ -2334,7 +2335,8 @@ int hcd_bus_resume(struct usb_device *rhdev, pm_message_t msg)
 
 	if (!PMSG_IS_AUTO(msg)) {
 		status = usb_phy_roothub_resume(hcd->self.sysdev,
-						hcd->phy_roothub);
+						hcd->phy_roothub,
+						usb_wakeup_enabled_descendants(rhdev));
 		if (status)
 			return status;
 	}
@@ -2379,7 +2381,8 @@ int hcd_bus_resume(struct usb_device *rhdev, pm_message_t msg)
 		}
 	} else {
 		hcd->state = old_state;
-		usb_phy_roothub_suspend(hcd->self.sysdev, hcd->phy_roothub);
+		usb_phy_roothub_suspend(hcd->self.sysdev, hcd->phy_roothub,
+					usb_wakeup_enabled_descendants(rhdev));
 		dev_dbg(&rhdev->dev, "bus %s fail, err %d\n",
 				"resume", status);
 		if (status != -ESHUTDOWN)

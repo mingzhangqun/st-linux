@@ -8,18 +8,33 @@
 
 #define DRIVER_NAME "stm32-usart"
 
+enum stm32_baudgen_type {
+	UART_BAUDGEN = 0,
+	LPUART_BAUDGEN = 1
+};
+
 struct stm32_usart_offsets {
-	u8 cr1;
-	u8 cr2;
-	u8 cr3;
-	u8 brr;
-	u8 gtpr;
-	u8 rtor;
-	u8 rqr;
-	u8 isr;
-	u8 icr;
-	u8 rdr;
-	u8 tdr;
+	u16 cr1;
+	u16 cr2;
+	u16 cr3;
+	u16 brr;
+	u16 gtpr;
+	u16 rtor;
+	u16 rqr;
+	u16 isr;
+	u16 icr;
+	u16 rdr;
+	u16 tdr;
+	u16 presc;
+	u16 hwcfgr1;
+};
+
+struct stm32_backup_regs {
+	u32 cr1;
+	u32 cr2;
+	u32 cr3;
+	u32 gtpr;
+	u32 brr;
 };
 
 struct stm32_usart_config {
@@ -28,7 +43,6 @@ struct stm32_usart_config {
 	bool has_swap;
 	bool has_wakeup;
 	bool has_fifo;
-	int fifosize;
 };
 
 struct stm32_usart_info {
@@ -36,7 +50,7 @@ struct stm32_usart_info {
 	struct stm32_usart_config cfg;
 };
 
-#define UNDEF_REG 0xff
+#define UNDEF_REG 0xfff
 
 /* USART_SR (F4) / USART_ISR (F7) */
 #define USART_SR_PE		BIT(0)
@@ -60,6 +74,7 @@ struct stm32_usart_info {
 #define USART_SR_TEACK		BIT(21)		/* F7 */
 #define USART_SR_ERR_MASK	(USART_SR_ORE | USART_SR_NE | USART_SR_FE |\
 				 USART_SR_PE)
+#define USART_SR_TCBGT		BIT(25)		/* F7 */
 /* Dummy bits */
 #define USART_SR_DUMMY_RX	BIT(16)
 
@@ -71,6 +86,11 @@ struct stm32_usart_info {
 #define USART_BRR_DIV_M_MASK	GENMASK(15, 4)
 #define USART_BRR_DIV_M_SHIFT	4
 #define USART_BRR_04_R_SHIFT	1
+#define USART_BRR_MASK		(USART_BRR_DIV_M_MASK | USART_BRR_DIV_F_MASK)
+
+/* LPUART_BRR */
+#define LPUART_BRR_MASK		GENMASK(19, 0)
+#define LPUART_BRR_MIN_VALUE	0x300
 
 /* USART_CR1 */
 #define USART_CR1_SBK		BIT(0)
@@ -150,6 +170,7 @@ struct stm32_usart_info {
 #define USART_CR3_TXFTCFG_SHIFT	29		/* H7 */
 
 /* USART_GTPR */
+#define USART_GTPR_PSC_SMART_MASK	GENMASK(4, 0)
 #define USART_GTPR_PSC_MASK	GENMASK(7, 0)
 #define USART_GTPR_GT_MASK	GENMASK(15, 8)
 
@@ -170,20 +191,34 @@ struct stm32_usart_info {
 #define USART_ICR_ORECF		BIT(3)		/* F7 */
 #define USART_ICR_IDLECF	BIT(4)		/* F7 */
 #define USART_ICR_TCCF		BIT(6)		/* F7 */
+#define USART_ICR_TCBGTCF	BIT(7)		/* F7 */
 #define USART_ICR_CTSCF		BIT(9)		/* F7 */
 #define USART_ICR_RTOCF		BIT(11)		/* F7 */
 #define USART_ICR_EOBCF		BIT(12)		/* F7 */
 #define USART_ICR_CMCF		BIT(17)		/* F7 */
 #define USART_ICR_WUCF		BIT(20)		/* H7 */
 
+/* USART_PRESC */
+#define USART_PRESC		GENMASK(3, 0)	/* H7 */
+#define USART_PRESC_MAX		0b1011
+static const unsigned int STM32_USART_PRESC_VAL[] = {1, 2, 4, 6, 8, 10, 12, 16, 32, 64, 128, 256};
+
+/* USART_HWCFCR1 */
+#define USART_HWCFCR1_CFG4	GENMASK(15, 12)	/* MP1 */
+#define USART_HWCFCR1_CFG7	GENMASK(27, 24)	/* MP1 */
+#define USART_HWCFCR1_CFG8	GENMASK(31, 28)	/* MP1 */
+
 #define STM32_SERIAL_NAME "ttySTM"
-#define STM32_MAX_PORTS 8
+#define STM32_MAX_PORTS 9
+#define STM32H7_USART_FIFO_SIZE 16
 
 #define RX_BUF_L 4096		 /* dma rx buffer length     */
 #define RX_BUF_P (RX_BUF_L / 2)	 /* dma rx buffer period     */
 #define TX_BUF_L RX_BUF_L	 /* dma tx buffer length     */
 
 #define STM32_USART_TIMEOUT_USEC USEC_PER_SEC /* 1s timeout in µs */
+
+#define LPUART_RECEIVE_TIMEOUT_MS 1000
 
 struct stm32_port {
 	struct uart_port port;
@@ -199,17 +234,23 @@ struct stm32_port {
 	u32 cr3_irq;		 /* USART_CR3_RXFTIE */
 	int last_res;
 	bool tx_dma_busy;	 /* dma tx transaction in progress */
+	bool rx_dma_busy;	 /* dma rx transaction in progress */
 	bool throttled;		 /* port throttled            */
 	bool hw_flow_control;
 	bool swap;		 /* swap RX & TX pins */
 	bool fifoen;
 	bool txdone;
+	bool has_rtor;
+	bool has_smartcard;
 	int rxftcfg;		/* RX FIFO threshold CFG      */
 	int txftcfg;		/* TX FIFO threshold CFG      */
 	bool wakeup_src;
 	int rdr_mask;		/* receive data register mask */
 	struct mctrl_gpios *gpios; /* modem control gpios */
 	struct dma_tx_state rx_dma_state;
+	struct stm32_backup_regs bkp_regs;
+	enum stm32_baudgen_type baudgen;
+	struct timer_list rx_dma_timer; /* Only used for LPUART */
 };
 
 static struct stm32_port stm32_ports[STM32_MAX_PORTS];

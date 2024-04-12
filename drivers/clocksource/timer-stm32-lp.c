@@ -168,9 +168,7 @@ static int stm32_clkevent_lp_probe(struct platform_device *pdev)
 	}
 
 	if (of_property_read_bool(pdev->dev.parent->of_node, "wakeup-source")) {
-		ret = device_init_wakeup(&pdev->dev, true);
-		if (ret)
-			goto out_clk_disable;
+		device_set_wakeup_capable(&pdev->dev, true);
 
 		ret = dev_pm_set_wake_irq(&pdev->dev, irq);
 		if (ret)
@@ -202,6 +200,7 @@ static int stm32_clkevent_lp_remove(struct platform_device *pdev)
 
 static const struct of_device_id stm32_clkevent_lp_of_match[] = {
 	{ .compatible = "st,stm32-lptimer-timer", },
+	{ .compatible = "st,stm32mp25-lptimer-timer", },
 	{},
 };
 MODULE_DEVICE_TABLE(of, stm32_clkevent_lp_of_match);

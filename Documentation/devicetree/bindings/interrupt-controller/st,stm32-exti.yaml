@@ -12,16 +12,21 @@ maintainers:
 
 properties:
   compatible:
+    description:
+      Legacy syscon is allowed for backward compatibility with old devicetree.
+      Don't use it on new devicetree.
     oneOf:
       - items:
           - enum:
               - st,stm32-exti
               - st,stm32h7-exti
+              - st,stm32mp1-exti
       - items:
           - enum:
               - st,stm32mp1-exti
               - st,stm32mp13-exti
           - const: syscon
+        deprecated: true
 
   "#interrupt-cells":
     const: 2
@@ -41,6 +46,8 @@ properties:
     maxItems: 96
     description:
       Interrupts references to primary interrupt controller
+
+  wakeup-parent: true
 
 required:
   - "#interrupt-cells"
@@ -83,14 +90,31 @@ examples:
   - |
     //Example 1
     exti1: interrupt-controller@5000d000 {
-        compatible = "st,stm32mp1-exti", "syscon";
+        compatible = "st,stm32mp1-exti";
         interrupt-controller;
         #interrupt-cells = <2>;
         reg = <0x5000d000 0x400>;
     };
 
+  - |
     //Example 2
-    exti2: interrupt-controller@40013c00 {
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    exti2: interrupt-controller@5000d000 {
+        compatible = "st,stm32mp1-exti";
+        interrupt-controller;
+        #interrupt-cells = <2>;
+        reg = <0x5000d000 0x400>;
+        wakeup-parent = <&pwr_irq>;
+        interrupts-extended =
+            <&intc GIC_SPI 6 IRQ_TYPE_LEVEL_HIGH>,
+            <0>,
+            <&pwr_irq 0 IRQ_TYPE_EDGE_FALLING 0>,
+            <&intc GIC_SPI 9 IRQ_TYPE_LEVEL_HIGH>;
+    };
+
+  - |
+    //Example 3
+    exti3: interrupt-controller@40013c00 {
         compatible = "st,stm32-exti";
         interrupt-controller;
         #interrupt-cells = <2>;
