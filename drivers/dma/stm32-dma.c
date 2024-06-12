@@ -850,17 +850,15 @@ static void stm32_mdma_chan_complete(void *param, const struct dmaengine_result 
 {
 	struct stm32_dma_chan *chan = param;
 
-	if (result->result == DMA_TRANS_NOERROR) {
-		if (!queue_work(chan->mdma_wq, &chan->mdma_work)) {
-			chan->busy = false;
-			chan->status = DMA_COMPLETE;
-			dev_warn(chan2dev(chan), "Work already queued\n");
-		}
-	} else {
-		chan->busy = false;
-		chan->status = DMA_COMPLETE;
+	chan->busy = false;
+	chan->status = DMA_COMPLETE;
+
+	if (result->result != DMA_TRANS_NOERROR) {
 		dev_err(chan2dev(chan), "MDMA transfer error: %d\n", result->result);
+		return;
 	}
+	if (!queue_work(chan->mdma_wq, &chan->mdma_work))
+		dev_warn(chan2dev(chan), "Work already queued\n");
 }
 
 static int stm32_dma_mdma_start(struct stm32_dma_chan *chan, struct stm32_dma_sg_req *sg_req)
