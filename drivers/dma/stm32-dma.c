@@ -2217,6 +2217,7 @@ static int stm32_dma_probe(struct platform_device *pdev)
 	const struct of_device_id *match;
 	struct resource *res;
 	struct reset_control *rst;
+	char dma_wq_name[12];
 	char name[4];
 	int i, ret;
 
@@ -2310,34 +2311,6 @@ static int stm32_dma_probe(struct platform_device *pdev)
 		chan->id = i;
 		chan->vchan.desc_free = stm32_dma_desc_free;
 		vchan_init(&chan->vchan, dd);
-
-		mchan = &chan->mchan;
-		if (dmadev->sram_pool) {
-			snprintf(name, sizeof(name), "ch%d", chan->id);
-			mchan->chan = dma_request_chan(dd->dev, name);
-			if (IS_ERR(mchan->chan)) {
-				ret = PTR_ERR(mchan->chan);
-				mchan->chan = NULL;
-				if (ret == -EPROBE_DEFER)
-					goto err_dma;
-
-				dev_info(&pdev->dev, "can't request MDMA chan for %s\n", name);
-			} else {
-				/*
-				 * Allocate workqueue per channel in case of MDMA/DMA chaining, to
-				 * avoid deadlock with MDMA callback stm32_mdma_chan_complete() when
-				 * MDMA interrupt handler is executed in a thread (which is the
-				 * case in Linux-RT kernel or if force_irqthreads is set).
-				 */
-				chan->mdma_wq = alloc_ordered_workqueue("dma_work-%s", 0, name);
-				if (!chan->mdma_wq) {
-					dma_release_channel(mchan->chan);
-					mchan->chan = NULL;
-					dev_warn(&pdev->dev,
-						 "can't alloc MDMA workqueue for %s\n", name);
-				}
-			}
-		}
 	}
 
 	ret = dma_async_device_register(dd);
@@ -2359,6 +2332,40 @@ static int stm32_dma_probe(struct platform_device *pdev)
 				"request_irq failed with err %d channel %d\n",
 				ret, i);
 			goto err_unregister;
+		}
+
+		mchan = &chan->mchan;
+		if (dmadev->sram_pool) {
+			snprintf(name, sizeof(name), "ch%d", chan->id);
+			mchan->chan = dma_request_chan(dd->dev, name);
+			if (IS_ERR(mchan->chan)) {
+				ret = PTR_ERR(mchan->chan);
+				mchan->chan = NULL;
+				if (ret == -EPROBE_DEFER)
+					goto err_unregister;
+
+				dev_info(&pdev->dev, "can't request MDMA chan for %s\n", name);
+			} else {
+				/*
+				 * Allocate workqueue per channel in case of MDMA/DMA chaining, to
+				 * avoid deadlock with MDMA callback stm32_mdma_chan_complete() when
+				 * MDMA interrupt handler is executed in a thread (which is the
+				 * case in Linux-RT kernel or if force_irqthreads is set).
+				 */
+				snprintf(dma_wq_name,
+					 sizeof(dma_wq_name), "dma%d%swq", dd->dev_id, name);
+				chan->mdma_wq = alloc_ordered_workqueue(dma_wq_name,
+									WQ_MEM_RECLAIM |
+									WQ_HIGHPRI);
+				if (!chan->mdma_wq) {
+					dma_release_channel(mchan->chan);
+					mchan->chan = NULL;
+					dev_warn(&pdev->dev,
+						 "can't alloc MDMA workqueue for %s\n", name);
+				} else {
+					dev_dbg(&pdev->dev, "Workqueue name: %s\n", dma_wq_name);
+				}
+			}
 		}
 	}
 
