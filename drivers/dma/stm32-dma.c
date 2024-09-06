@@ -836,11 +836,23 @@ static void stm32_mdma_chan_complete_worker(struct work_struct *work)
 
 	spin_lock_irqsave_nested(&chan->vchan.lock, flags, SINGLE_DEPTH_NESTING);
 
-	if (chan->next_sg == chan->desc->num_sgs) {
+	/*
+	 * Added NULL check in stm32_mdma_chan_complete_worker to ensure that
+	 * the chan->desc is not NULL. This is necessary because the desc can
+	 * be deleted by an asynchronous call made to stm32_dma_terminate_all.
+	 * In this scenario, when the stm32_mdma_chan_complete_worker is
+	 * executed the chan->desc becomes NULL and the Kernel crashes.
+	 */
+	if (chan->desc && chan->next_sg == chan->desc->num_sgs) {
 		vchan_cookie_complete(&chan->desc->vdesc);
 		chan->desc = NULL;
 	}
 
+	/*
+	 * It does not make much of a difference if we call this function in case
+	 * chan->desc is NULL. The stm32_dma_start_transfer will handle the NULL
+	 * for chan->desc and vdesc both.
+	 */
 	stm32_dma_start_transfer(chan);
 
 	spin_unlock_irqrestore(&chan->vchan.lock, flags);
