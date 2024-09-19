@@ -537,6 +537,8 @@ static int stm32_dma_terminate_all(struct dma_chan *c)
 	LIST_HEAD(head);
 
 	if (chan->use_mdma) {
+		if (!chan->desc->cyclic && mchan->dir != DMA_MEM_TO_DEV)
+			cancel_work_sync(&chan->mdma_work);
 		spin_lock_irqsave_nested(&chan->vchan.lock, flags, SINGLE_DEPTH_NESTING);
 		dmaengine_terminate_async(mchan->chan);
 	} else {
