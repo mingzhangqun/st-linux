@@ -585,7 +585,8 @@ static int stm32_dma_mdma_drain(struct stm32_dma_chan *chan)
 	int ret;
 	unsigned long flags;
 
-	flush_workqueue(chan->mdma_wq);
+	if (!chan->desc->cyclic)
+		cancel_work_sync(&chan->mdma_work);
 
 	/* DMA/MDMA chain: drain remaining data in SRAM */
 
