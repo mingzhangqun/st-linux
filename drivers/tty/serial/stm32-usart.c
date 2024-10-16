@@ -983,7 +983,7 @@ static int stm32_usart_startup(struct uart_port *port)
 
 	ret = request_threaded_irq(port->irq, stm32_usart_interrupt,
 				   stm32_usart_threaded_interrupt,
-				   IRQF_ONESHOT | IRQF_NO_SUSPEND,
+				   IRQF_ONESHOT,
 				   name, port);
 	if (ret)
 		return ret;
