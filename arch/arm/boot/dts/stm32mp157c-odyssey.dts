@@ -6,9 +6,10 @@
 /dts-v1/;
 
 #include "stm32mp157c-odyssey-som.dtsi"
+#include "stm32mp157c-odyssey-scmi.dtsi"
 
 / {
-	model = "Seeed Studio Odyssey-STM32MP157C Board";
+	model = "Seeed Studio STM32MP157C-Odyssey Board";
 	compatible = "seeed,stm32mp157c-odyssey",
 		     "seeed,stm32mp157c-odyssey-som", "st,stm32mp157";
 
