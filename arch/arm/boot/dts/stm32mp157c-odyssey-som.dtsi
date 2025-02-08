@@ -72,6 +72,32 @@
 			gpios = <&gpiog 3 GPIO_ACTIVE_HIGH>;
 			linux,default-trigger = "heartbeat";
 		};
+
+		/* enable stmps2252 usb power switch */
+		usben1 {
+			label = "usb-en1";
+			gpios = <&gpioh  13  GPIO_ACTIVE_HIGH>;
+			linux,default-trigger = "usb-en1";
+			default-state = "on";
+		};
+
+		usben2 {
+			label = "usb-en2";
+			gpios = <&gpiof  8  GPIO_ACTIVE_HIGH>;
+			linux,default-trigger = "usb-en2";
+			default-state = "on";
+		};
+	};
+
+	usb_phy_tuning: usb-phy-tuning {
+		st,hs-dc-level = <2>;
+		st,fs-rftime-tuning;
+		st,hs-rftime-reduction;
+		st,hs-current-trim = <15>;
+		st,hs-impedance-trim = <1>;
+		st,squelch-level = <3>;
+		st,hs-rx-offset = <2>;
+		st,no-lsfs-sc;
 	};
 
 	vin: vin {
@@ -80,7 +106,7 @@
 		regulator-min-microvolt = <5000000>;
 		regulator-max-microvolt = <5000000>;
 		regulator-always-on;
-	};
+ 	};
 };
 
 &i2c2 {
@@ -105,11 +131,20 @@
 
 		regulators {
 			compatible = "st,stpmic1-regulators";
-			ldo1-supply = <&v3v3>;
-			ldo3-supply = <&vdd_ddr>;
-			ldo6-supply = <&v3v3>;
-			pwr_sw1-supply = <&bst_out>;
-			pwr_sw2-supply = <&bst_out>;
+			buck1-supply = <&vin>;
+			buck2-supply = <&vin>;
+			buck3-supply = <&vin>;
+			buck4-supply = <&vin>;
+ 			ldo1-supply = <&v3v3>;
+			ldo2-supply = <&vin>;
+ 			ldo3-supply = <&vdd_ddr>;
+			ldo4-supply = <&vin>;
+			ldo5-supply = <&vin>;
+ 			ldo6-supply = <&v3v3>;
+			vref_ddr-supply = <&vin>;
+			boost-supply = <&vin>;
+ 			pwr_sw1-supply = <&bst_out>;
+ 			pwr_sw2-supply = <&bst_out>;
 
 			vddcore: buck1 {
 				regulator-name = "vddcore";
