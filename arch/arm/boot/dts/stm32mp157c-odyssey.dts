@@ -37,20 +37,19 @@
 	phy-mode = "rgmii-id";
 	max-speed = <1000>;
 	phy-handle = <&phy0>;
-	assigned-clocks = <&rcc ETHCK_K>, <&rcc PLL4_P>;
-	assigned-clock-parents = <&rcc PLL4_P>;
-	assigned-clock-rates = <125000000>; /* Clock PLL4 to 750Mhz in ATF/U-Boot */
 	st,eth-clk-sel;
 
-	mdio {
+	snps,reset-gpio = <&gpiog 0 GPIO_ACTIVE_LOW>;
+	snps,reset-active-low;
+	snps,reset-delays-us = <0 30000 50000>;
+
+	mdio0 {
 		#address-cells = <1>;
 		#size-cells = <0>;
 		compatible = "snps,dwmac-mdio";
+
 		phy0: ethernet-phy@7 { /* KSZ9031RN */
 			reg = <7>;
-			reset-gpios = <&gpiog 0 GPIO_ACTIVE_LOW>; /* ETH_RST# */
-			reset-assert-us = <10000>;
-			reset-deassert-us = <300>;
 		};
 	};
 };
